@@ -7,7 +7,8 @@
 
 #  perl itm_zombie_survey.pl
 #
-#  Identify agents that are online but not responsive
+#  Identify agents that may be online but not responsive
+#  Read the first record of the operations log in groups.
 #
 #  john alvord, IBM Corporation, 24 August 2013
 #  jalvord@us.ibm.com
@@ -21,13 +22,18 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.25000";
+my $gVersion = "0.30000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 BEGIN {
    $ENV{'PERL_NET_HTTPS_SSL_SOCKET_CLASS'} = "Net::SSL";
    $ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
 };   #
+
+my $zombie_start = time;
+
+#  use warnings::unused; # installs the check routine as 'once'
+#  use warnings 'once';  # enables  the check routine
 
 use DateTime;                   # Computing with Date Time
 use SOAP::Lite;                 # simple SOAP processing. add 'debug' to increase tracing
@@ -49,15 +55,14 @@ my $soap_faultstr;                     # fault string from SOAP results
 my $soap_faultcode;                    # fault code - where the fault originates
 my $run_status = 0;                    # A count of pending runtime errors - used to allow multiple error detection before stopping process
 my $oHub;                              # SOAP::Lite object to define connection
+my $review_survey_timeout;
 
+# some common variables
 
-
-my @list = ();
+my @list = ();                         # used to get result of good SOAP capture
 my $rc;
 my $node;
 my $product;
-my $onecmd;
-my $oneparm;
 my $f;
 my $ptx;
 my $s_errcode;
@@ -66,6 +71,9 @@ my $s_errtext;
 my $myargs;
 my $survey_sqls = 0;                     # count of SQLs
 my $survey_sql_time = 0;                 # record total elapsed time in SQL processing
+my @words = ();
+my $rt;
+my $tlen;
 
 # forward declarations of subroutines
 
@@ -75,30 +83,14 @@ sub dumplog;                             # dump current log to disk file
 sub dumplogexit;                         # dump current log to disk file and exit
 sub survey_agent;                        # Survey one agent
 sub tems_node_analysis;                   # perform analysis of TEMS node status
-sub write_stat_report;                   # write statistics report
 sub DoSoap;                              # perform a SOAP request and return results
-sub survey_error_events;                 # review current ITM events
-sub survey_error_files;                  # review current survey error files
-sub survey_error_sync;                   # synchronize error files and ITM events
-sub survey_error_sync_cmd;               # synchronize error files and produce needed commands
-sub survey_error_sync_cmd_send;          # produce error_commands at startup
 sub get_timestamp;                       # get current timestatmp
 sub calc_timestamp;                      # Add or subtract time from an ITM timestamp
 sub get_ITM_epoch;                       # convert from ITM timestamp to epoch seconds
 sub datadumperlog;                       # dump a variable using Dump::Data if installed
 sub get_connection;                      # get current connection string
-sub sitgroup_get_sits;                   # recursive sitgroup exploration
 
 # runtime Statistics variables
-my $survey_start_time = time;            # starting time of run
-my $survey_runtime;                      # used to calculate current runtime
-my $survey_sleeptime = 0;                # record current sleeptime
-my $survey_nodes_all;                    # count of known nodes
-my $survey_nodes = 0;                    # count of nodes with given product and TEMS
-my $survey_nodes_success = 0;            # count of surveyed nodes - success
-my $survey_nodes_fail = 0;               # count of surveyed nodes - fail
-my $survey_nodes_undone = 0;             # count of surveyed nodes - not yet done
-my $survey_nodes_cmd = 0;                # count of Agent commands, some could be errors
 my $survey_tems = 0;                     # count of times TEMS surveyed
 
 
@@ -116,41 +108,23 @@ my @opt_tems = ();              # TEMS names to survey
 my %opt_temsx = ();             # index to TEMS names
 my $opt_dpr;                    # dump data structure flag
 my $opt_std;                    # Credentials from standard input
-my $opt_limit;                  # Number of agents to survey before stopping
-my $opt_onecycle;               # Perform one full cycle and then stop
 my $opt_agent;                  # Review one agent and then stop
-my $opt_agent_oplog;            # Get one agent oplog and then stop
-my $opt_cmd;                    # A command to execute
-my @opt_cmds;                   # A command to execute
-my @opt_synch = ();             # synch/duper situations
-my %opt_synchx = ();            # synch index
-my $synchi = -1;                # number of synch
-my @synch = ();                 # synch name
-my @synch_sits = ();            # synch situations
 my $opt_group_num;              # number of agents to query at one time
-my $dx;
+my $opt_agent_timeout;          # How long to wait for agents
+my $opt_soap_timeout;           # How long to wait SOAP request
+my $opt_retry;                  # when 0, retry non-responsive agents
+my $opt_retry_timeout;          # delay time during retry, default 15
+my $opt_o;                      # output file
 
 my $user="";
 my $passwd="";
 
 # Parse control file which contains  operational defaults -
 #
-my $review_delay;
 my @connections = ();               # list of possible hub TEMS servers
-my $connection="";
+my $connection="";                  # one particular connection
 my $history_path = "./";
-my $review_delay_success = 604800;  # seven days
-my $review_delay_fail    = 86400;   # one day
-my $review_delay_nowork  = 300;     # five minutes
-my $review_cycle_target  = 60;      # 60 seconds per survey
-my $alert_excessive_actions = 0;    # From level 1.10000, option ignored
-my $review_survey_timeout = 180;    # how many seconds to wait for a response
 my $review_tems_time      = 0;      # time of last TEMS static review
-my $review_tems_delay     = 43200;  # delay until next static TEMS review
-my $error_situation       =  "";    # Situation used to display error conditions in Portal Client
-my $agent_flurry          =  60;    # During of initial stop/start messages after reconnection to TEMS
-my $error_cmd             =  "";    # Exit command to communicate error cases
-my $error_cmd_startup     = 0;      # Run exit commands at startup for existing error cases
 
 my $cmd;
 my $cmd_file;
@@ -171,37 +145,22 @@ logit(0,"SURVEY000I - ITM_Zombie_Survey $gVersion $args_start");
 # Variables associated directly with SOAP calls and responses
 # CPU and Memory
 my $sSQL;
-my $key;
-my $keycmd;
 my @log;
-my @alog;
-my @elog;
-my $agent_elog;
-my $agent_alog;
-my $agent_oplog;
 my $survey_count = 0;
 
 # variables for storing Situation Description information from the hub TEMS
 
 my $sx;
-my $siti = -1;
 my @sitnames     = ();
 my %sitnamex     = ();
 my @sitobjaccl   = ();
 my @situadaccl   = ();
-my @sitcmd       = ();
-my $incmd;
-my $sit;
-my $sitrun;
 
 my %objcobj = ();
 
 # variables for storing node and nodelist information from the hub TEMS
 
-my $ssnx;
-my $nx;
 my $snx;
-my $nnx;
 my $nodli = -1;
 my @snodlnames = ();
 my %snodlx = ();
@@ -215,30 +174,21 @@ my @snode_survey_online = ();                  # used to track offline condition
 my @snode_survey_sits = ();                    # situations gotten from the survey - Run at Startup
 my @snode_persist_sits = ();                   # persist ituations gotten from the survey
 my @snode_survey_sits_noauto = ();             # situations gotten from the survey - not Run at Startup
-my @snode_tems_nodelists = ();                 # Managed System Lists the node is included in
 my @snode_tems_product = ();                   # Product Code [Agent type] the agent is associated with
-my @snode_tems_situations = ();                # list of situations that should be running on the node
-my @snode_tems_situation_commands = ();        # list of situation with commands that should be running on the node
 my @snode_tems_thrunode = ();                  # thrunode [remote TEMS for simple situations] the agent connects to
-my @snode_survey_thrunodes = ();                 # all thrunodes [remote TEMS for simple situations] the agent connects to
 my @snode_tems_version = ();                   # version of [remote TEMS for simple situations] the agent connects to
 my @snode_tems_hostaddr = ();                  # hostaddr information, include ip address
 my @snode_agent_version = ();                  # version  information, include ip address
 my @snode_agent_common  = ();                  # common software levels
-my @snode_survey_status = ();                  # set to 1 when got good status
-my @snode_survey_stamp = ();                   # the local timestamp of last connect to TEMS time
-my @snode_survey_time = ();                    # time when survey started
-my @snode_survey_time_capture = ();            # epoch when agent time capured
-my @snode_survey_time_start = ();              # time when Agent started
 my @snode_survey_maxdelay = ();                # maximum time to last situation started
 my @snode_survey_maxdelay_situation = ();      # situation started
-my @snode_survey_time_skew = ();               # difference between the agent time and TEMS time
-my @snode_survey_uptime = ();                  # uptime in seconds
 my @snode_survey_connects = ();                # count of connects
 my @snode_survey_sitct = ();                   # count of situations running at the node
 my @snode_survey_actions = ();                 # count of situation start/stop actions at the node
 my @snode_agent_responsive = ();               # when 1, node was responsive
 my @snode_agent_interested = ();               # when 1, node is being checked
+my @snode_agent_retry      = ();               # when 1, retry needed
+my @snode_agent_oplog1     = ();               # when non-null, invalid first oplog record
 
 my $tx;                                        # index
 my $temsi = -1;                                # count of TEMSes in survey
@@ -253,20 +203,9 @@ my @tems_vmsize = ();                          # current process size
 my @tems_cpubusy = ();                         # current process cpubusy
 my @tems_server_busy = ();                     # current server cpubusy
 my @tems_hostaddr = ();                        # current server host address
-my @tems_os_agent = ();                        # name of OS Agent on the TEMS server
-my @tems_os_agent_product = ();                   # OS Agent product type
-my @tems_os_agent_thrunode = ();               # OS Agent - TEMS that it is connected to
 my $temsat = "";                               # AT clause for SQL to all TEMSes
 my $tems_hub_nodeid = "";                      # nodeid of hub;
-my $tems_sitgroup = 0;                         # when 1, situation groups on hub TEMS
 
-my $gx;
-my $grpi = -1;
-my @grp = ();
-my %grpx = ();
-my @grp_sit = ();
-my @grp_grp = ();
-my %sum_sits = ();
 
 # variables for getting product information from the node status table
 
@@ -274,46 +213,7 @@ my $prodi = -1;
 my @prodnames = ();
 my %prodx = ();
 my @prodsits = ();
-my $px;
 
-# variable used for error_cmd like processing.
-
-my $cmd_agent;
-my $cmd_agent_hostaddr;
-my $cmd_agent_thrunode;
-my $cmd_agent_error;
-my $cmd_agent_status;
-my $cmd_hub;
-my $cmd_survey_hostname;
-my $cmd_survey_status;
-my $cmd_survey_version;
-my $cmd_survey_time;
-
-# variables for tracking error alerts and files
-
-my $ex;
-my $error_event_nodei = -1;
-my @error_event_node = ();
-my %error_event_nodex = ();
-my @error_event_item = ();
-my @error_event_timestamp = ();
-my @error_event_found = ();
-my @error_event_deleted = ();
-
-my $error_file_nodei = -1;
-my @error_file_node = ();
-my %error_file_nodex = ();
-my @error_file_item = ();
-my @error_file_timestamp = ();
-my @error_file_found = ();
-
-my $error_file_prev_nodei = -1;
-my @error_file_prev_node = ();
-my %error_file_prev_nodex = ();
-my @error_file_prev_item = ();
-my @error_file_prev_timestamp = ();
-my @error_file_prev_found = ();
-my @error_file_prev_deleted = ();
 
 
 # try out each SOAP connection, looking for the current FTO hub TEMS primary
@@ -333,7 +233,8 @@ foreach my $c (@connections) {
       $run_status = 0;
       next;
    }
-   $oHub = SOAP::Lite->proxy($connection,timeout => $review_survey_timeout);
+#   $oHub = SOAP::Lite->proxy($connection,timeout => $opt_soap_timeout);
+   $oHub = SOAP::Lite->proxy($connection);
    $oHub->outputxml('true');
    $oHub->on_fault( sub {});      # pass back all errors
 
@@ -364,7 +265,7 @@ foreach my $c (@connections) {
    next if $#list == -1;
    $node = $list[0]-> {NODE};
    logit(0,"Survey trial of connection $connection TEMS $node - determine if hub TEMS is in primary role");
-   $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR AT( '*HUB' ) WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
+   $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR AT( '$node' ) WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) {
       $DB::single=2 if $opt_debug == 1;
@@ -389,115 +290,195 @@ logit(0,"Survey tems_node_analysis start");
 $rc=tems_node_analysis();
 logit(0,"Survey tems_node_analysis end");
 
-
-# At this point we have all the information needed to calculate the situations which
-# should be running on the agents in these array slices
-
-$survey_nodes_all = $snodei;
+# variables needed in groupped retrieval
 
 my $ragenti = -1;
-my $ragentgi = -1;
 my $ragent_low = "";
 my $ragent_high = "";
 my $in_id;
 my $in_datetime;
 my $in_node;
+my @sort_nodeix = ();
 
-foreach $f ( sort { $snode[$snodex{$a}] <=> $snode[$snodex{$b}] } keys %snodex ) {
+# make preliminary pass to prepare for grouped retrieval
+
+foreach $f ( sort { $snode[$snodex{$a}] cmp $snode[$snodex{$b}] } keys %snodex ) {
+   $ragenti += 1;
    my $i = $snodex{$f};
-   $ragenti  += 1;
-   $ragentgi += 1;
-   if ($ragent_low eq "") {
-      $ragent_low = $snode[$i];
-      $ragent_high = $snode[$i];
+   $sort_nodeix[$ragenti] = $f;
+}
+
+$ragenti = -1;
+for (my $i=0; $i<=$snodei; $i++) {
+   my $endi = $i + $opt_group_num - 1;
+   $endi = $snodei if $endi > $snodei;
+   if ($i == 0) {
+      $ragent_low = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+   } else {
+      my $im1 = $i - 1;
+      $ragent_low = $sort_nodeix[$im1];
    }
-   $ragent_low  =  $snode[$i] if $snode[$i] < $ragent_low;
-   $ragent_high =  $snode[$i] if $snode[$i] > $ragent_high;
-   if ($ragentgi < $opt_group_num) {
-      next if $ragenti < $survey_nodes_all;
+   if ($i == $endi) {
+      $ragent_high = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+   } elsif ($endi == $snodei) {
+      $ragent_high = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+   } else {
+      my $ip1 = $endi + 1;
+      $ragent_high = $sort_nodeix[$ip1];
    }
-$DB::single=2;
+   $i = $endi;
    # when we get here $ragent_low and $ragent_high bracket the high and low ranges to be surveyed
-   $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG '$temsat' WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND ORIGINNODE >= '$ragent_low' AND ORIGINNODE <= '$ragent_high' AND ID='KRALOG000';";
+   # for some reason <= and >= did not work as expected so must use < and >
+   $tlen = length($opt_agent_timeout);
+   my $ragent_limits;
+   if (($ragent_low eq "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") and ($ragent_high eq "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")) {
+      $ragent_limits = "";
+   } elsif ($ragent_low eq "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
+     $ragent_limits = "AND ORIGINNODE < '$ragent_high'";
+   } elsif ($ragent_high eq "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz") {
+     $ragent_limits = "AND ORIGINNODE > '$ragent_low'";
+   } else {
+     $ragent_limits = "AND ORIGINNODE > '$ragent_low' AND ORIGINNODE < '$ragent_high'";
+   }
+   $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG $temsat WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND SYSTEM.PARMA('TIMEOUT','$opt_agent_timeout',$tlen) $ragent_limits AND ID='KRALOG000';";
    @list = DoSoap("CT_Get",$sSQL);
 
-$DB::single=2;
-   # note errors but continue on
+   # ignore errors
    if ($run_status == 0) {
-$DB::single=2;
+      my $pcount = $#list + 1;
+      logit(0,"received $pcount responses");
+      my $ll = 0;                      # debug
       if ($#list >= 0) {
-$DB::single=2;
          foreach my $r (@list) {
-$DB::single=2;
             my $in_id = $r->{ID};
             $in_id =~ s/\s+$//;   #trim trailing whitespace
             $in_datetime = $r->{DATETIME};
             $in_datetime =~ s/\s+$//;   #trim trailing whitespace
-##          $originnode = $r->{System_Name};
-##          $originnode =~ s/\s+$//;   #trim trailing whitespace
-            $in_node = $r->{ORIGINNODE};
+            $in_node = $r->{System_Name};
             $in_node =~ s/\s+$//;   #trim trailing whitespace
-$DB::single=2;
+#           next if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";  # test missing case
             $sx = $snodex{$in_node};
             next if !defined $sx;
-$DB::single=2;
-            next if $snode_agent_interested[$i] == 0;
-$DB::single=2;
-            $snode_agent_responsive[$i] = 1
+            next if $snode_agent_interested[$sx] == 0;
+            $ll++;                     # debug
+            next if $ll == 3;          # debug
+            $snode_agent_responsive[$sx] = 1
          }
       }
    }
-$DB::single=2;
-   #reset group count, low and high bounds
-   $ragentgi = -1;
-   $ragent_low = "";
-   $ragent_high = "";
-   last if $ragenti == $survey_nodes_all;
-$DB::single=2;
+   dumplog;
+}
+# if wanted, redo the non-responsive ones individually...
+if ($opt_retry == 1) {
+   for (my $i=0; $i<=$snodei; $i++) {
+      next if $snode_agent_interested[$i] == 0;
+      next if $snode_agent_responsive[$i] == 1;
+      my $tlen = length($opt_agent_timeout);
+      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
+      @list = DoSoap("CT_Get",$sSQL);
+      # note errors but continue on
+      if ($run_status == 0) {
+         if ($#list == 0) {
+            foreach my $r (@list) {
+               my $in_id = $r->{ID};
+               $in_id =~ s/\s+$//;   #trim trailing whitespace
+               $in_datetime = $r->{DATETIME};
+               $in_datetime =~ s/\s+$//;   #trim trailing whitespace
+               $in_node = $r->{System_Name};
+               $in_node =~ s/\s+$//;   #trim trailing whitespace
+#              next if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";  # test missing case
+               $snode_agent_responsive[$i] = 1;
+               $snode_agent_retry[$i] = 1;
+   #$DB::single=2 if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";
+   #           $in_id = "xxxxx" if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";  # test bad id
+               $snode_agent_oplog1[$i] = $in_id if $in_id ne "KRALOG000";
+            }
+         }
+      }
+
+   }
+   dumplog;
 }
 
-$DB::single=2;
+
 my $total_uninterested = 0;
 my $total_nonresponsive = 0;
 my $total_responsive = 0;
+my $total_retries = 0;
+my $total_oplog1 = 0;
 my $rlinei = -1;
 my @rline = ();
+my $outline;
 
-$DB::single=2;
 # now produce report
 for (my $i=0; $i<=$snodei; $i++) {
-$DB::single=2;
    if ($snode_agent_interested[$i] == 0) {
-$DB::single=2;
       $total_uninterested += 1;
    } elsif ($snode_agent_responsive[$i] == 0) {
-$DB::single=2;
       $total_nonresponsive += 1;
-      $rlinei++;$rline[$rlinei]="$snode[$i],\n";
+      $outline = "$snode[$i],";
+      $outline .= "$snode_tems_thrunode[$i],";
+      $outline .= "$snode_tems_version[$i],";
+      $outline .= "$snode_tems_product[$i],";
+      $outline .= "$snode_agent_version[$i],";
+      @words = split(";",$snode_agent_common[$i]);
+      @words = split(":",$words[1]);
+      my $p_ver = substr($words[0],2,8);
+      $outline .= "$p_ver,";
+      $outline .= "$snode_tems_hostaddr[$i],";
+      $rlinei++;$rline[$rlinei]="$outline\n";
    } else {
-$DB::single=2;
       $total_responsive += 1;
+      $total_retries += 1 if $snode_agent_retry[$i] == 1;
+   }
+}
+$rlinei++;$rline[$rlinei]="\n";
+if ($total_retries > 0) {
+   $rlinei++;$rline[$rlinei]="Responsive agents with invalid oplog first line\n";
+   $rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Oplog1,Hostaddr\n";
+   for (my $i=0; $i<=$snodei; $i++) {
+      next if $snode_agent_responsive[$i] == 0;
+      next if $snode_agent_retry[$i] == 0;
+      next if $snode_agent_oplog1[$i] eq "";
+      $outline = "$snode[$i],";
+      $outline .= "$snode_tems_thrunode[$i],";
+      $outline .= "$snode_tems_version[$i],";
+      $outline .= "$snode_tems_product[$i],";
+      $outline .= "$snode_agent_version[$i],";
+      @words = split(";",$snode_agent_common[$i]);
+      @words = split(":",$words[1]);
+      my $p_ver = substr($words[0],2,8);
+      $outline .= "$p_ver,";
+      $outline .= "$snode_agent_oplog1[$i],";
+      $total_oplog1 += 1;
+      $outline .= "$snode_tems_hostaddr[$i],";
+      $rlinei++;$rline[$rlinei]="$outline\n";
    }
 }
 
-$DB::single=2;
-print "Zombie Agent Report\n";
-print "\n";
-print "Total Managed systems,$survey_nodes_all,\n";
-print "Total Responsive agents,$total_responsive,\n";
-print "Total Zombie agents,$total_nonresponsive,\n";
-print "Total Managed systems,$survey_nodes_all,\n";
-print "\n";
-print "Zombie Agents\n";
 
-$DB::single=2;
+my $zombie_dur = time - $zombie_start;
+
+open OH, ">$opt_o" or die "can't open '$opt_o': $!";
+print OH "Zombie Agent Report $gVersion - duration $zombie_dur seconds\n";
+print OH "Arguments $args_start\n";
+print OH "\n";
+my $psnodei = $snodei+1;
+print OH "Total Managed systems,$psnodei,\n";
+print OH "Total Responsive agents,$total_responsive,\n";
+print OH "Total Responsive agents needing retry,$total_retries,\n";
+print OH "Total Zombie agents,$total_nonresponsive,\n";
+print OH "Total Invalid Oplog agents,$total_oplog1,\n";
+print OH "\n";
+print OH "Zombie Agents\n";
+print OH "Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Hostaddr\n";
+
 for (my $i=0; $i<=$rlinei; $i++) {
-$DB::single=2;
-   print $rline[$i];
+   print OH $rline[$i];
 }
-$DB::single=2;
+close OH;
 
-dumplogexit;
+dumplog;
 
 exit 0;
 
@@ -516,18 +497,18 @@ sub init {
               'passwd=s' => \$passwd,                 # password
               'debuglevel=i' => \ $opt_debuglevel,    # log file contents control
               'group_num=i' => \ $opt_group_num,      # Number of agents to query at one time
+              'agent_timeout=i' => \ $opt_agent_timeout, # Agent timeout
               'debug' => \ $opt_debug,                # log file contents control
-              'onecycle' => \ $opt_onecycle,          # log file contents control
               'h' => \ $opt_h,                        # help
               'v' => \  $opt_v,                       # verbose - print immediately as well as log
+              'retry' => \  $opt_retry,               # retry failures one by one
+              'retry_timeout=i' => \ $opt_retry_timeout, # retry failures one by one
+              'o=s' => \ $opt_o,                      # output file
               'pc=s' => \  @opt_pc,                   # Product Code
               'tems=s' => \  @opt_tems,               # TEMS names
               'dpr' => \ $opt_dpr,                    # dump data structures
               'std' => \ $opt_std,                    # credentials from standard input
-              'limit=i' => \ $opt_limit,              # limit of surveys
-              'cmd=s{1,2}'   => \@opt_cmds,           # Single command to perform
-              'agent=s' => \ $opt_agent,              # Single agent survey
-              'agent_oplog=s' => \ $opt_agent_oplog   # Single agent oplog
+              'agent=s' => \ $opt_agent              # Single agent survey
              );
    # if other things found on the command line - complain and quit
    @myargs_remain_array = @$myargs_remain;
@@ -545,7 +526,6 @@ sub init {
    if ($opt_h) {&GiveHelp;}  # GiveHelp and exit program
    if (!defined $opt_debuglevel) {$opt_debuglevel=90;}         # debug logging level - low number means fewer messages
    if (!defined $opt_debug) {$opt_debug=0;}                    # debug - turn on rare error cases
-   if (!defined $opt_cmd) {$opt_cmd="";}                       # if no command, null it out
 
    # ini control file must be present
 
@@ -566,16 +546,14 @@ sub init {
       $l++;
       chomp($oneline);
       next if (substr($oneline,0,1) eq "#");  # skip comment line
-      my @words = split(" ",$oneline);
+      @words = split(" ",$oneline);
       next if $#words == -1;                  # skip blank line
        if ($#words == 0) {                         # single word parameters
-         if ($words[0] eq "alert_excessive_actions") {$alert_excessive_actions = 1;}
-         elsif ($words[0] eq "debug") {$opt_debug = 1;}
+         if ($words[0] eq "debug") {$opt_debug = 1;}
          elsif ($words[0] eq "verbose") {$opt_v = 1;}
-         elsif ($words[0] eq "onecycle") {$opt_onecycle = 1;}
          elsif ($words[0] eq "std") {$opt_std = 1;}
+         elsif ($words[0] eq "retry") {$opt_retry = 1;}
          elsif ($words[0] eq "passwd") {}                      # null password
-         elsif ($words[0] eq "error_cmd_startup") {$error_cmd_startup = 1;}
          else {
             logit(0,"SURVEY003E Control without needed parameters $words[0] - $opt_ini [$l]");
             $run_status++;
@@ -591,34 +569,12 @@ sub init {
       elsif ($words[0] eq "log") {$opt_log = $words[1];}
       elsif ($words[0] eq "pc") {push(@opt_pc,$words[1]);}
       elsif ($words[0] eq "tems") {push(@opt_tems,$words[1]);}
-      elsif ($words[0] eq "limit") {$opt_limit = $words[1];}
       elsif ($words[0] eq "agent") {$opt_agent = $words[1];}
       elsif ($words[0] eq "group_num") {$opt_group_num = $words[1];}
-      elsif ($words[0] eq "agent_oplog") {$opt_agent_oplog = $words[1];}
+      elsif ($words[0] eq "agent_timeout") {$opt_agent_timeout = $words[1];}
+      elsif ($words[0] eq "o") {$opt_o = $words[1];}
+      elsif ($words[0] eq "soap_timeout") {$opt_soap_timeout = $words[1];}
       elsif ($words[0] eq "history_path") {$history_path = $words[1];}
-      elsif ($words[0] eq "review_delay_success") {$review_delay_success = $words[1];}
-      elsif ($words[0] eq "review_delay_fail") {$review_delay_fail = $words[1];}
-      elsif ($words[0] eq "review_delay_nowork") {$review_delay_nowork = $words[1];}
-      elsif ($words[0] eq "review_cycle_target") {$review_cycle_target = $words[1];}
-      elsif ($words[0] eq "review_survey_timeout") {$review_survey_timeout = $words[1];}
-      elsif ($words[0] eq "review_tems_delay") {$review_tems_delay = $words[1];}
-      elsif ($words[0] eq "error_situation") {$error_situation = $words[1];}
-      elsif ($words[0] eq "error_cmd") {
-         shift @words;
-         $error_cmd = join(" ",@words);
-      }
-      elsif ($words[0] eq "synch") {
-         $synchi++;
-         $opt_synch[$synchi] = $words[1];
-         $opt_synchx{$words[1]} = $synchi;
-         shift @words;
-         shift @words;
-         $synch_sits[$synchi] = join(" ",@words);
-      }
-      elsif ($words[0] eq "agent_flurry") {
-         logit(0,"Control agent_flurry ignored - no longer used");
-         $agent_flurry = $words[1];
-         }
       else {
          logit(0,"SURVEY005E ini file $l - unknown control $words[0]"); # kill process after current phase
          $run_status++;
@@ -630,17 +586,17 @@ sub init {
    if (!defined $opt_log) {$opt_log = "zombie.log";}           # default log file if not specified
    if (!defined $opt_h) {$opt_h=0;}                            # help flag
    if (!defined $opt_v) {$opt_v=0;}                            # verbose flag
-   if (!defined $opt_onecycle) {$opt_onecycle=0;}              # verbose flag
-   if (!defined $opt_limit){$opt_limit=0;}                     # How many nodes to survey
    if (!defined $opt_agent){$opt_agent="";}                    # Single survey agent
-   if (!defined $opt_agent_oplog){$opt_agent_oplog="";}        # Single survey oplog capture
    if (!defined $opt_dpr) {$opt_dpr=0;}                        # data dump flag
    if (!defined $opt_std) {$opt_std=0;}                        # default - no credentials in stdin
    if (!defined $opt_group_num) {$opt_group_num=100;}          # default 100 agents queried at a time
+   if (!defined $opt_agent_timeout) {$opt_agent_timeout=50;}   # default 50 seconds
+   if (!defined $opt_soap_timeout) {$opt_soap_timeout=180;}    # default 180 seconds
+   if (!defined $opt_retry) {$opt_retry=0;}                    # default to no retry
+   if (!defined $opt_retry_timeout) {$opt_retry_timeout=15;}           # default 15 second retry
+   if (!defined $opt_o) {$opt_o="zombie.csv";}                 # default output file
 
-   if ($alert_excessive_actions == 1) {
-      logit(0,"Control alert_excessive_actions ignored - now controlled in summary process");
-   }
+   $review_survey_timeout = $opt_soap_timeout;    # how many seconds to wait for a response
 
    # collect the TEMSes information into an array
    foreach my $t (@opt_tems) {$opt_temsx{$t} = 1;}
@@ -711,29 +667,7 @@ sub init {
    $cmd_work_local = $cmd_work;
    $cmd_file_local =~ s/\//\\/g;
    $cmd_work_local =~ s/\//\\/g;
-
-   $opt_cmd = join(" ",@opt_cmds);
-   if ($opt_cmd ne "") {
-      if ($gWin == 1) {
-         $cmd = "echo $opt_cmd \>\>$cmd_file_local";      # windows flavor of command
-      } else {
-         $cmd = "echo $opt_cmd \>\>$cmd_file";                  # linux/unix flavor of command
-      }
-      system($cmd);
-      $rc = $?>>8;
-      if ($rc != 0) {
-         logit(0,"command $cmd failed with exit code $rc - $!");
-      }
-      dumplog;
-      exit 0;
-   }
 }
-
-write_stat_report;
-dumplogexit;
-
-exit 0;
-
 
 sub tems_node_analysis
 {
@@ -745,12 +679,10 @@ sub tems_node_analysis
 
 
    # reset all variables used by the tems static analysis
-   $siti = -1;
    @sitnames     = ();
    %sitnamex     = ();
    @sitobjaccl   = ();
    @situadaccl   = ();
-   $sitrun = "";
    %objcobj = ();
 
    $nodli = -1;
@@ -766,30 +698,21 @@ sub tems_node_analysis
    @snode_survey_sits = ();
    @snode_persist_sits = ();
    @snode_survey_sits_noauto = ();
-   @snode_tems_nodelists = ();
    @snode_tems_product = ();
-   @snode_tems_situations = ();
-   @snode_tems_situation_commands = ();
    @snode_tems_thrunode = ();
-   @snode_survey_thrunodes = ();
    @snode_tems_version = ();
    @snode_tems_hostaddr = ();
    @snode_agent_version = ();                  # version  information, include ip address
    @snode_agent_common  = ();                  # common software levels
-   @snode_survey_status = ();
-   @snode_survey_stamp = ();
-   @snode_survey_time = ();
-   @snode_survey_time_capture = ();
-   @snode_survey_time_start = ();
    @snode_survey_maxdelay = ();
    @snode_survey_maxdelay_situation = ();
-   @snode_survey_time_skew = ();
-   @snode_survey_uptime = ();
    @snode_survey_connects = ();
    @snode_survey_sitct = ();
    @snode_survey_actions = ();
    @snode_agent_responsive = ();               # when 1, node was responsive
    @snode_agent_interested = ();               # when 1, node is being checked
+   @snode_agent_retry      = ();               # when 1, retry needed
+   @snode_agent_oplog1     = ();               # when non-null, invalid first oplog record
 
    $temsi = -1;
    @tems = ();
@@ -800,22 +723,13 @@ sub tems_node_analysis
    @tems_cpubusy = ();                         # current process cpubusy
    @tems_server_busy = ();                     # current server cpubusy
    @tems_hostaddr = ();                        # current TEMS host address
-   @tems_os_agent = ();                        # name of OS Agent on the TEMS server
-   @tems_os_agent_product = ();                   # OS Agent product type
-   @tems_os_agent_thrunode = ();               # OS Agent - tems the agent is connected to
    @tems_time = ();
    @tems_time_epoch = ();
    @tems_time_capture = ();
    $temsat = "";
-   $tems_sitgroup = 0;                         # when 1, situation groups on hub TEMS
 
    # variables for tracking situation groups.
 
-   $grpi = -1;
-   @grp = ();
-   %grpx = ();
-   @grp_sit = ();
-   @grp_grp = ();
 
    # variables for getting product information from the node status table
 
@@ -830,7 +744,7 @@ sub tems_node_analysis
    my $name;
 
    # get names of online TEMSes
-   $sSQL = "SELECT NODE, THRUNODE, HOSTADDR, VERSION FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT='EM'";
+   $sSQL = "SELECT NODE,THRUNODE,HOSTADDR,VERSION,HOSTINFO FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT='EM'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
 
@@ -841,11 +755,18 @@ sub tems_node_analysis
        $tx = $temsi;
        $tems[$tx] = $node;
        $temsx{$node} = $tx;
-       my $thrunode = $r->{THRUNODE};
+       my $thrunode = $r->{'THRUNODE'};
        $thrunode =~ s/\s+$//;   #trim trailing whitespace
        $tems_thrunode[$tx] = $thrunode;
-       $tems_version[$tx] = $r->{VERSION};
-       my $hostaddr = $r->{HOSTADDR};
+       $tems_version[$tx] = $r->{'VERSION'};
+       my $hostaddr;
+       $rt = ref($r->{HOSTADDR});
+       if ($rt eq "HASH") {
+          $hostaddr = $r->{HOSTADDR}->{'IP.PIPE'};
+          $hostaddr = $r->{HOSTADDR}->{'IP.SPIPE'} if !defined $hostaddr;
+       } else {
+          $hostaddr = $r->{HOSTADDR};
+       }
        $hostaddr =~ s/\s+$//;   #trim trailing whitespace
        $tems_hub_nodeid = $node if $node eq $thrunode;
        $tems_hostaddr[$tx] = $hostaddr;
@@ -854,9 +775,6 @@ sub tems_node_analysis
        $tems_vmsize[$tx] = 0;
        $tems_cpubusy[$tx] = 0;
        $tems_server_busy[$tx] = 0;
-       $tems_os_agent[$tx] = "";
-       $tems_os_agent_product[$tx] = "";
-       $tems_os_agent_thrunode[$tx] = "";
    }
 
 
@@ -887,13 +805,14 @@ sub tems_node_analysis
    for (my $i = 0; $i <=$temsi; $i++) {
       next if $tems_time[$i] == 0;
       if ($temsat eq "") { $temsat = "AT('";} else {$temsat .= ",'";}
-     $temsat .= $node . "'";
+     $temsat .= $tems[$i] . "'";
    }
    $temsat .= ")";
 
    # get node status for online managed systems
 
-   $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y'";
+#  $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM' AND FIRST(175)";  # debug
+   $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
 
@@ -910,7 +829,6 @@ sub tems_node_analysis
        $agent_version =~ s/\s+$//;   #trim trailing whitespace
        my $agent_common = $r->{RESERVED};
        $agent_common =~ s/\s+$//;   #trim trailing whitespace
-$DB::single=2;
        $ptx = $temsx{$thrunode};    #ignore any agents not connected through TEMSes
        next if !defined $ptx;       # the subnode agents
 
@@ -921,43 +839,40 @@ $DB::single=2;
           $node_filebase = $node;
           $node_filebase =~ s/:/_/g;
           $snode_filex{$node_filebase} = $snx;
-          $snode_tems_nodelists[$snx] = "";
           $snode_survey_online[$snx] = 1;                    # node online when we checked the TEMS tables
           $snode_survey_sits[$snx] = " ";
           $snode_persist_sits[$snx] = " ";
           $snode_survey_sits_noauto[$snx] = " ";
-          $snode_tems_situations[$snx] = " ";
-          $snode_tems_situation_commands[$snx] = " ";
           $snode_tems_product[$snx] = $product;
           $snode_tems_hostaddr[$snx] = $hostaddr;
           $snode_tems_thrunode[$snx] = $thrunode;
-          $snode_survey_thrunodes[$snx] = "";
           $snode_agent_version[$snx] = $agent_version;
           $snode_tems_version[$snx] = "";
           $ptx = $temsx{$thrunode};
           $snode_tems_version[$snx] = $tems_version[$ptx] if defined $ptx;
           $snode_agent_common[$snx] = $agent_common;
-          $snode_survey_status[$snx] = -1;
           $snode_agent_responsive[$snx] = 0;           # non-responsive until tested
           $snode_agent_interested[$snx] = 1;           # interested unless product values set
-$DB::single=2;
+          $snode_agent_retry[$snx]      = 0;           # retry needed
+          $snode_agent_oplog1[$snx]     = "";          # invalid first oplog entry
           if ($#opt_pc != -1) {                        # if product codes set, only interested in those
-$DB::single=2;
              $ptx = $opt_pcx{$product};
-$DB::single=2;
              $snode_agent_interested[$snx] = 0 if !defined $ptx;
-$DB::single=2;
+          }
+          if ($#opt_tems != -1) {
+             $ptx = $opt_temsx{$thrunode};
+             $snode_agent_interested[$snx] = 0 if !defined $ptx;
           }
 
+          $ptx = $temsx{$thrunode};
+          $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] == 0;
+
 #??  handle single agent check
-#$DB::single=2;
 #          if ($opt_agent ne "") {
-#$DB::single=2;
 #             next if $node ne $opt_agent;
 #          }
-#$DB::single=2;
 
-       logit(100,"Node $snodei $node product[$snode_tems_product[$snx]] thrunode[[$snode_tems_thrunode[$snx]] hostaddr[[$snode_tems_hostaddr[$snx]]  agent_version[$snode_agent_version[$snx]] tems_version[$snode_tems_version[$snx]] agent_common[$snode_agent_common[$snx]]");
+       logit(100,"Node $snodei $node product[$snode_tems_product[$snx]] thrunode[[$snode_tems_thrunode[$snx]] hostaddr[[$snode_tems_hostaddr[$snx]]  agent_version[$snode_agent_version[$snx]]  agent_common[$snode_agent_common[$snx]]");
    }
 
   dumplog;
@@ -971,7 +886,6 @@ $DB::single=2;
 #------------------------------------------------------------------------------
 sub DoSoap
 {
-   my $rt;
    $survey_sqls++;                             # keep count of SQLs
    $soap_faultstr = "";                             # reset fault string to null
    $soap_faultcode = "";                            # reset fault code to null
@@ -1183,8 +1097,8 @@ sub GiveHelp
 
   $0 v$gVersion
 
-  This script surveys an ITM environment looking for exceptions such as
-  situations not running as expected.
+  This script surveys an ITM environment looking agents which are
+  online but possible not responsive.
 
   Default values:
     log          : zombie.log
@@ -1193,17 +1107,18 @@ sub GiveHelp
     passwd       : <none>
     debuglevel   : 90 [considerable number of messages]
     debug        : 0  when 1 some breakpoints are enabled]
-    onecycle     : 0  survey all agents under current filter and then stop
     h            : 0  display help information
     v            : 0  display log messages on console
     pc           : product code of agents - can supply multiple codes
     tems         : tems the agents report to - can supply multiple code
     dpr          : 0  dump data structure if Dump::Data installed
     std          : 0  get user/password from stardard input
-    limit        : 0  stop after this many surveys if positive
-    cmd          : <none> single comand to perform
     agent        : <none> single agent survey and then stop
-    agent_optlog : <none> capture operations log from single agent and then stop
+    agent_oplog : <none> capture operations log from single agent and then stop
+    group_num    : number of agents to check at one time, default 100
+    agent_timeout : seconds to wait for an agent response, default 50 seconds
+    retry         : after a detected failure, retry on each problem case, default off
+    retry_timeout : Agent timeout during retry - default 15 seconds
 
   Example invovation
     $0  -ini <control file> -pc ux -limit 40
@@ -1254,6 +1169,7 @@ sub dumplog
    open FH, ">>$opt_log" or die "can't open '$opt_log': $!";
    foreach ( @log ) { print FH $_ . "\n";}
    close FH;
+   @log = ();
 }
 
 # write output log
@@ -1657,3 +1573,4 @@ $run_status++;
 # History log
 
 # 0.25000  : New script based on Agent Survey 3.40000
+# 0.30000  : add retry logic, check for invalid oplog
