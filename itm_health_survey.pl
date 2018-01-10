@@ -22,7 +22,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.30000";
+my $gVersion = "0.50000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 BEGIN {
@@ -36,6 +36,7 @@ my $zombie_start = time;
 #  use warnings 'once';  # enables  the check routine
 
 use DateTime;                   # Computing with Date Time
+#use SOAP::Lite +trace => 'all';                 # simple SOAP processing. add 'debug' to increase tracing
 use SOAP::Lite;                 # simple SOAP processing. add 'debug' to increase tracing
 use HTTP::Request::Common;      #   and HTTP - for SOAP processing
 use XML::TreePP;                # parse XML
@@ -62,6 +63,7 @@ my $review_survey_timeout;
 my @list = ();                         # used to get result of good SOAP capture
 my $rc;
 my $node;
+my $nodelist;
 my $product;
 my $f;
 my $ptx;
@@ -74,6 +76,9 @@ my $survey_sql_time = 0;                 # record total elapsed time in SQL proc
 my @words = ();
 my $rt;
 my $tlen;
+my $tlen1;
+my $key;
+my $save_timeout;
 
 # forward declarations of subroutines
 
@@ -190,6 +195,18 @@ my @snode_agent_interested = ();               # when 1, node is being checked
 my @snode_agent_retry      = ();               # when 1, retry needed
 my @snode_agent_oplog1     = ();               # when non-null, invalid first oplog record
 
+my $xprodi = -1;
+my @xprod = ();
+my %xprodx = ();
+my %xprodn = ();
+my @xprod_agent = ();
+my @xprod_msl = ();
+
+my $pxprodi = -1;
+my @pxprod = ();
+my %pxprodx = ();
+my @pxprod_count = ();
+
 my $tx;                                        # index
 my $temsi = -1;                                # count of TEMSes in survey
 my @tems = ();                                 # TEMS names
@@ -234,7 +251,8 @@ foreach my $c (@connections) {
       next;
    }
 #   $oHub = SOAP::Lite->proxy($connection,timeout => $opt_soap_timeout);
-   $oHub = SOAP::Lite->proxy($connection);
+#   $oHub = SOAP::Lite->proxy($connection,keep_alive=>1,timeout => $opt_soap_timeout);
+   $oHub = SOAP::Lite->proxy($connection,keep_alive=>1);
    $oHub->outputxml('true');
    $oHub->on_fault( sub {});      # pass back all errors
 
@@ -265,8 +283,13 @@ foreach my $c (@connections) {
    next if $#list == -1;
    $node = $list[0]-> {NODE};
    logit(0,"Survey trial of connection $connection TEMS $node - determine if hub TEMS is in primary role");
-   $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR AT( '$node' ) WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
+#  $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR AT( '$node' ) WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
+   $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
+   $save_timeout=$oHub->timeout;
+   $oHub->timeout(10);
    @list = DoSoap("CT_Get",$sSQL);
+   $oHub->timeout($save_timeout);
+   $save_timeout=$oHub->timeout(10);
    if ($run_status) {
       $DB::single=2 if $opt_debug == 1;
       $run_status = 0;
@@ -290,89 +313,58 @@ logit(0,"Survey tems_node_analysis start");
 $rc=tems_node_analysis();
 logit(0,"Survey tems_node_analysis end");
 
-# variables needed in groupped retrieval
-
-my $ragenti = -1;
-my $ragent_low = "";
-my $ragent_high = "";
 my $in_id;
 my $in_datetime;
 my $in_node;
-my @sort_nodeix = ();
 
-# make preliminary pass to prepare for grouped retrieval
-
-foreach $f ( sort { $snode[$snodex{$a}] cmp $snode[$snodex{$b}] } keys %snodex ) {
-   $ragenti += 1;
-   my $i = $snodex{$f};
-   $sort_nodeix[$ragenti] = $f;
-}
-
-$ragenti = -1;
-for (my $i=0; $i<=$snodei; $i++) {
-   my $endi = $i + $opt_group_num - 1;
-   $endi = $snodei if $endi > $snodei;
-   if ($i == 0) {
-      $ragent_low = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-   } else {
-      my $im1 = $i - 1;
-      $ragent_low = $sort_nodeix[$im1];
-   }
-   if ($i == $endi) {
-      $ragent_high = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
-   } elsif ($endi == $snodei) {
-      $ragent_high = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
-   } else {
-      my $ip1 = $endi + 1;
-      $ragent_high = $sort_nodeix[$ip1];
-   }
-   $i = $endi;
-   # when we get here $ragent_low and $ragent_high bracket the high and low ranges to be surveyed
-   # for some reason <= and >= did not work as expected so must use < and >
-   $tlen = length($opt_agent_timeout);
-   my $ragent_limits;
-   if (($ragent_low eq "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") and ($ragent_high eq "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")) {
-      $ragent_limits = "";
-   } elsif ($ragent_low eq "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
-     $ragent_limits = "AND ORIGINNODE < '$ragent_high'";
-   } elsif ($ragent_high eq "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz") {
-     $ragent_limits = "AND ORIGINNODE > '$ragent_low'";
-   } else {
-     $ragent_limits = "AND ORIGINNODE > '$ragent_low' AND ORIGINNODE < '$ragent_high'";
-   }
-   $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG $temsat WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND SYSTEM.PARMA('TIMEOUT','$opt_agent_timeout',$tlen) $ragent_limits AND ID='KRALOG000';";
-   @list = DoSoap("CT_Get",$sSQL);
-
-   # ignore errors
-   if ($run_status == 0) {
-      my $pcount = $#list + 1;
-      logit(0,"received $pcount responses");
-      my $ll = 0;                      # debug
-      if ($#list >= 0) {
-         foreach my $r (@list) {
-            my $in_id = $r->{ID};
-            $in_id =~ s/\s+$//;   #trim trailing whitespace
-            $in_datetime = $r->{DATETIME};
-            $in_datetime =~ s/\s+$//;   #trim trailing whitespace
-            $in_node = $r->{System_Name};
-            $in_node =~ s/\s+$//;   #trim trailing whitespace
-#           next if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";  # test missing case
-            $sx = $snodex{$in_node};
-            next if !defined $sx;
-            next if $snode_agent_interested[$sx] == 0;
-            $ll++;                     # debug
-            next if $ll == 3;          # debug
-            $snode_agent_responsive[$sx] = 1
-         }
+for (my $t=0; $t<=$temsi; $t++) {
+   my $at_tems = $tems[$t];
+   for (my $p=0; $p<=$xprodi; $p++) {
+      my $at_product = $xprod[$p];
+      my $at_nodelist = $xprod_msl[$p];
+      if ($at_nodelist eq ""){
+         logit(10,"working on product[$at_product] null nodelist");
+         next;
       }
-   }
-   dumplog;
-}
+      next if $at_nodelist eq "";
+      $key = $at_tems . "_" . $at_product;
+      logit(10,"working on $key nodelist[$nodelist] product_index[$p] tems[$at_tems] tems_index[$t]");
+      $ptx = $pxprodx{$key};
+      next if !defined  $ptx;
+      next if $pxprod_count[$ptx] == 0;
+      $tlen = length($nodelist);
+      $tlen1 = length($opt_agent_timeout);
+      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$at_tems') WHERE SYSTEM.PARMA('NODELIST','$at_nodelist',$tlen ) AND SYSTEM.PARMA('TIMEOUT','$opt_agent_timeout',$tlen1) AND ID='KRALOG000';";
+      @list = DoSoap("CT_Get",$sSQL);
+
+      # ignore errors
+      if ($run_status == 0) {
+         my $pcount = $#list + 1;
+         logit(0,"received $pcount responses for $nodelist at tems[$at_tems] product[$at_product]");
+         if ($#list >= 0) {
+            foreach my $r (@list) {
+               my $in_id = $r->{ID};
+               $in_id =~ s/\s+$//;   #trim trailing whitespace
+               $in_datetime = $r->{DATETIME};
+               $in_datetime =~ s/\s+$//;   #trim trailing whitespace
+               $in_node = $r->{System_Name};
+               $in_node =~ s/\s+$//;   #trim trailing whitespace
+               $sx = $snodex{$in_node};
+               next if !defined $sx;
+               next if $snode_agent_interested[$sx] == 0;
+               $snode_agent_responsive[$sx] = 1
+            } # next entries
+         } # some entries
+      } # bad soap return
+   } # next product
+} # next TEMS
+
 # if wanted, redo the non-responsive ones individually...
 if ($opt_retry == 1) {
    for (my $i=0; $i<=$snodei; $i++) {
       next if $snode_agent_interested[$i] == 0;
       next if $snode_agent_responsive[$i] == 1;
+      logit(0,"working on agent[$snode[$i]] $i of $snodei");
       my $tlen = length($opt_agent_timeout);
       $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
       @list = DoSoap("CT_Get",$sSQL);
@@ -386,11 +378,8 @@ if ($opt_retry == 1) {
                $in_datetime =~ s/\s+$//;   #trim trailing whitespace
                $in_node = $r->{System_Name};
                $in_node =~ s/\s+$//;   #trim trailing whitespace
-#              next if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";  # test missing case
                $snode_agent_responsive[$i] = 1;
                $snode_agent_retry[$i] = 1;
-   #$DB::single=2 if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";
-   #           $in_id = "xxxxx" if $in_node eq "NMP184.tivlab.raleigh.ibm.com:KU";  # test bad id
                $snode_agent_oplog1[$i] = $in_id if $in_id ne "KRALOG000";
             }
          }
@@ -810,6 +799,7 @@ sub tems_node_analysis
    $temsat .= ")";
 
    # get node status for online managed systems
+   my $samp_nodes = "";    #prepare for nodelist capture
 
 #  $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM' AND FIRST(175)";  # debug
    $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM'";
@@ -832,47 +822,86 @@ sub tems_node_analysis
        $ptx = $temsx{$thrunode};    #ignore any agents not connected through TEMSes
        next if !defined $ptx;       # the subnode agents
 
-          $snodei++;
-          $snx = $snodei;
-          $snode[$snx] = $node;
-          $snodex{$node} = $snx;
-          $node_filebase = $node;
-          $node_filebase =~ s/:/_/g;
-          $snode_filex{$node_filebase} = $snx;
-          $snode_survey_online[$snx] = 1;                    # node online when we checked the TEMS tables
-          $snode_survey_sits[$snx] = " ";
-          $snode_persist_sits[$snx] = " ";
-          $snode_survey_sits_noauto[$snx] = " ";
-          $snode_tems_product[$snx] = $product;
-          $snode_tems_hostaddr[$snx] = $hostaddr;
-          $snode_tems_thrunode[$snx] = $thrunode;
-          $snode_agent_version[$snx] = $agent_version;
-          $snode_tems_version[$snx] = "";
-          $ptx = $temsx{$thrunode};
-          $snode_tems_version[$snx] = $tems_version[$ptx] if defined $ptx;
-          $snode_agent_common[$snx] = $agent_common;
-          $snode_agent_responsive[$snx] = 0;           # non-responsive until tested
-          $snode_agent_interested[$snx] = 1;           # interested unless product values set
-          $snode_agent_retry[$snx]      = 0;           # retry needed
-          $snode_agent_oplog1[$snx]     = "";          # invalid first oplog entry
-          if ($#opt_pc != -1) {                        # if product codes set, only interested in those
-             $ptx = $opt_pcx{$product};
-             $snode_agent_interested[$snx] = 0 if !defined $ptx;
+       $snodei++;
+       $snx = $snodei;
+       $snode[$snx] = $node;
+       $snodex{$node} = $snx;
+       $node_filebase = $node;
+       $node_filebase =~ s/:/_/g;
+       $snode_filex{$node_filebase} = $snx;
+       $snode_survey_online[$snx] = 1;                    # node online when we checked the TEMS tables
+       $snode_survey_sits[$snx] = " ";
+       $snode_persist_sits[$snx] = " ";
+       $snode_survey_sits_noauto[$snx] = " ";
+       $snode_tems_product[$snx] = $product;
+       $snode_tems_hostaddr[$snx] = $hostaddr;
+       $snode_tems_thrunode[$snx] = $thrunode;
+       $snode_agent_version[$snx] = $agent_version;
+       $snode_tems_version[$snx] = "";
+       $ptx = $temsx{$thrunode};
+       $snode_tems_version[$snx] = $tems_version[$ptx] if defined $ptx;
+       $snode_agent_common[$snx] = $agent_common;
+       $snode_agent_responsive[$snx] = 0;           # non-responsive until tested
+       $snode_agent_interested[$snx] = 1;           # interested unless product values set
+       $snode_agent_retry[$snx]      = 0;           # retry needed
+       $snode_agent_oplog1[$snx]     = "";          # invalid first oplog entry
+       if ($#opt_pc != -1) {                        # if product codes set, only interested in those
+          $ptx = $opt_pcx{$product};
+          $snode_agent_interested[$snx] = 0 if !defined $ptx;
+       }
+       if ($#opt_tems != -1) {
+          $ptx = $opt_temsx{$thrunode};
+          $snode_agent_interested[$snx] = 0 if !defined $ptx;
+       }
+
+       $ptx = $temsx{$thrunode};
+       $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] == 0;
+
+       # record the first agent for each product type. Will be used to determine system generated
+       # managed systemlist later on.
+       $ptx = $xprodx{$product};
+       if (!defined $ptx) {
+          $xprodi++;
+          $ptx = $xprodi;
+          $xprod[$ptx] = $product;
+          $xprodx{$product} = $ptx;
+          $xprodn{$node} = $ptx;
+          $xprod_agent[$ptx] = $node;
+          $xprod_msl[$ptx] = "";
+          if ($samp_nodes eq "") {
+             $samp_nodes .= "NODE='$node'";
+          } else {
+             $samp_nodes .= " OR NODE='$node'";
           }
-          if ($#opt_tems != -1) {
-             $ptx = $opt_temsx{$thrunode};
-             $snode_agent_interested[$snx] = 0 if !defined $ptx;
-          }
+       }
 
-          $ptx = $temsx{$thrunode};
-          $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] == 0;
-
-#??  handle single agent check
-#          if ($opt_agent ne "") {
-#             next if $node ne $opt_agent;
-#          }
-
+       # keep track of the number of products of each type at each TEMS
+       # No sense in asking for data when there is none there
+       $key = $thrunode . "_" . $product;
+       $ptx = $pxprodx{$key};
+       if (!defined $ptx) {
+          $pxprodi++;
+          $ptx = $pxprodi;
+          $pxprod[$ptx] = $key;
+          $pxprodx{$key} = $ptx;
+          $pxprod_count[$ptx] = 0;
+       }
+       $pxprod_count[$ptx] += 1;
        logit(100,"Node $snodei $node product[$snode_tems_product[$snx]] thrunode[[$snode_tems_thrunode[$snx]] hostaddr[[$snode_tems_hostaddr[$snx]]  agent_version[$snode_agent_version[$snx]]  agent_common[$snode_agent_common[$snx]]");
+   }
+   # Get TNODELST data to figure out what the system generated MSL name is for each product
+   $sSQL = "SELECT NODE, NODELIST, NODETYPE FROM O4SRV.TNODELST WHERE $samp_nodes AND NODETYPE='M'";
+   @list = DoSoap("CT_Get",$sSQL);
+   if ($run_status) { exit 1;}
+
+   foreach my $r (@list) {
+       $node = $r->{NODE};
+       $node =~ s/\s+$//;   #trim trailing whitespace
+       $nodelist = $r->{NODELIST};
+       $nodelist =~ s/\s+$//;   #trim trailing whitespace
+       next if substr($nodelist,0,1) ne "*";
+       $ptx = $xprodn{$node};
+       $xprod_msl[$ptx] = $nodelist if defined $ptx;
    }
 
   dumplog;
@@ -928,6 +957,7 @@ sub DoSoap
       $res = $oHub->CT_Get(@aParms);
       $soap_rc = $?;
       $survey_sql_time += time - $sql_start_time;
+#     sleep 10;
       logit(10,"SOAP CT_Get_Object end [$soap_rc] - $mySQL");
       return $res if $get_raw eq 'raw';                 # use raw return
 
