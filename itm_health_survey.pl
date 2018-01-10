@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.80000";
+my $gVersion = "0.90000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -36,17 +36,10 @@ BEGIN {
 #  use warnings::unused; # installs the check routine as 'once'
 #  use warnings 'once';  # enables  the check routine
 
-
-use DateTime;                   # Computing with Date Time
-#use SOAP::Lite +trace => 'all';        # simple SOAP processing. add 'debug' to increase tracing
 use SOAP::Lite;                 # simple SOAP processing. add 'debug' to increase tracing
 use HTTP::Request::Common;      #   and HTTP - for SOAP processing
 use XML::TreePP;                # parse XML
-#use Module::Load;               # more flexible
 #use Data::Dumper;               # debug only
-#use LWP::UserAgent;
-#use LWP::Debug;
-#LWP::Debug::level('+');
 #SOAP::Lite->import(+trace => 'all');
 
 # following object used to parse SOAP results and xml files.
@@ -98,7 +91,6 @@ sub tems_node_analysis;                   # perform analysis of TEMS node status
 sub DoSoap;                              # perform a SOAP request and return results
 sub get_timestamp;                       # get current timestatmp
 sub calc_timestamp;                      # Add or subtract time from an ITM timestamp
-sub get_ITM_epoch;                       # convert from ITM timestamp to epoch seconds
 sub datadumperlog;                       # dump a variable using Dump::Data if installed
 sub get_connection;                      # get current connection string
 sub gettime;                             # get time
@@ -163,12 +155,7 @@ my $survey_count = 0;
 # variables for storing Situation Description information from the hub TEMS
 
 my $sx;
-my @sitnames     = ();
-my %sitnamex     = ();
-my @sitobjaccl   = ();
-my @situadaccl   = ();
 
-my %objcobj = ();
 
 # variables for storing node and nodelist information from the hub TEMS
 
@@ -215,8 +202,6 @@ my $temsi = -1;                                # count of TEMSes in survey
 my @tems = ();                                 # TEMS names
 my %temsx = ();                                # index to TEMS
 my @tems_time = ();                            # Current UTC time at the TEMS
-my @tems_time_epoch = ();                      # Current UTC time at the TEMS in epoch seconds
-my @tems_time_capture = ();                    # Epoch seconds at time capture
 my @tems_thrunode = ();                        # thrunode - can be used to identify hub
 my @tems_version = ();                         # version
 my @tems_vmsize = ();                          # current process size
@@ -858,12 +843,13 @@ sub init {
    foreach my $t (@opt_pc) {$opt_pcx{$t} = 1;}
 
    if ($opt_dpr == 1) {
-      my $module = "Data::Dumper";
-      eval {load $module};
-      if ($@) {
-         print STDERR "Cannot load Data::Dumper - ignoring -dpr option\n";
-         $opt_dpr = 0;
-      }
+#     my $module = "Data::Dumper";
+#     eval {load $module};
+#     if ($@) {
+#        print STDERR "Cannot load Data::Dumper - ignoring -dpr option\n";
+#        $opt_dpr = 0;
+#     }
+      $opt_dpr = 0;
    }
 
    # if credential as passed in via standard input, then that takes precendence.
@@ -912,11 +898,6 @@ sub tems_node_analysis
 
 
    # reset all variables used by the tems static analysis
-   @sitnames     = ();
-   %sitnamex     = ();
-   @sitobjaccl   = ();
-   @situadaccl   = ();
-   %objcobj = ();
 
    $nodli = -1;
    @snodlnames = ();
@@ -951,8 +932,6 @@ sub tems_node_analysis
    @tems_hostaddr = ();                        # current TEMS host address
    @tems_zombie_ct = ();                        # current TEMS host address
    @tems_time = ();
-   @tems_time_epoch = ();
-   @tems_time_capture = ();
    $temsat = "";
 
    # variables for tracking situation groups.
@@ -1000,7 +979,6 @@ sub tems_node_analysis
        $tems_hostaddr[$tx] = $hostaddr;
        $tems_zombie_ct[$tx] = 0;
        $tems_time[$tx] = 0;
-       $tems_time_capture[$tx] = 0;
        $tems_vmsize[$tx] = 0;
        $tems_cpubusy[$tx] = 0;
        $tems_server_busy[$tx] = 0;
@@ -1026,8 +1004,6 @@ sub tems_node_analysis
          next;
       }
       $tems_time[$i] = $list[0]->{Timestamp};
-      $tems_time_epoch[$i] = get_ITM_epoch($list[0]->{Timestamp});
-      $tems_time_capture[$i] = time;
    }
 
    # calculate list of operational TEMSes that responded with a time.
@@ -1498,48 +1474,6 @@ sub get_timestamp {
 
    my $etime = "1" . $nyy . $nmo . $ndd . $nhh . $nmm . $nss . "000";  # check time in ITM 16 byte format
    return $etime;
-}
-
-# get current epoch in seconds from ITM standard timestamp form
-sub get_ITM_epoch {
-   my $itm_stamp = shift;
-#(my $icc, my $iyy, my $imo, my $idd, my $ihh, my $imm, my $iss) = unpack("A1 A2 A2 A2 A2 A2 A2",$itm_stamp);
-(my $iyy, my $imo, my $idd, my $ihh, my $imm, my $iss) = unpack("A2 A2 A2 A2 A2 A2",substr($itm_stamp,1));
-
-my $dt0 = DateTime->new(year=>"20" . $iyy,
-                       month=>$imo,
-                       day=>$idd,
-                       hour=>$ihh,
-                       minute=>$imm,
-                       second=>$iss);
-return $dt0->epoch();
-}
-
-# calculate with timestamps
-
-sub calc_timestamp {
-   my $instamp = shift;
-   my $infunc = shift;
-   my $indelta = shift;
-   my $outstamp;
-
-   my $dt0 = DateTime->new(year=>"20" . substr($instamp,1,2),
-                          month=>substr($instamp,3,2),
-                          day=>substr($instamp,5,2),
-                          hour=>substr($instamp,7,2),
-                          minute=>substr($instamp,9,2),
-                          second=>substr($instamp,11,2));
-
-   my $dt = $dt0->clone();
-   if ($infunc eq "-") {
-      $dt = $dt->subtract(seconds=>$indelta);
-   } else {
-      $dt = $dt->add(seconds=>$indelta);
-   }
-
-   # return calculated time in ITM 16 byte format
-   $outstamp = "1" . substr("00" . $dt->year,-2,2) . substr("00" . $dt->month,-2,2) . substr("00" . $dt->day,-2,2) . substr("00" . $dt->hour,-2,2) . substr("00" . $dt->minute,-2,2)  . substr("00" . $dt->second,-2,2) . "000";
-   return $outstamp;
 }
 
 # Following logic replicates most of the tacmd processing logic to determine the
