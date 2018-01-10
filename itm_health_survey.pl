@@ -22,7 +22,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.60000";
+my $gVersion = "0.75000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 BEGIN {
@@ -67,6 +67,7 @@ my $oHub;                              # SOAP::Lite object to define connection
 my @list = ();                         # used to get result of good SOAP capture
 my $rc;
 my $node;
+my $hub_node;
 my $nodelist;
 my $product;
 my $f;
@@ -82,7 +83,6 @@ my $rt;
 my $tlen;
 my $tlen1;
 my $key;
-my $save_timeout;
 my $debugfile;
 my $ll;
 my $pcount;
@@ -91,7 +91,6 @@ my $pcount;
 
 sub init;                                # read command line and ini file
 sub logit;                               # queue one record to survey log
-sub dumplog;                             # dump current log to disk file
 sub dumplogexit;                         # dump current log to disk file and exit
 sub survey_agent;                        # Survey one agent
 sub tems_node_analysis;                   # perform analysis of TEMS node status
@@ -142,6 +141,8 @@ if ($opt_vt == 1) {
    open $debugfile, '>traffic.txt' or die "can't open 'traffic.txt': $!";;
    $debugfile->autoflush(1);
 }
+
+open FH, ">>$opt_log" or die "can't open '$opt_log': $!";
 
 logit(0,"SURVEY000I - ITM_Zombie_Survey $gVersion $args_start");
 
@@ -205,6 +206,7 @@ my %xprodx = ();
 my %xprodn = ();
 my @xprod_agent = ();
 my @xprod_msl = ();
+my @xprod_msls = ();
 
 my $pxprodi = -1;
 my @pxprod = ();
@@ -227,6 +229,34 @@ my @tems_hostaddr = ();                        # current server host address
 my $temsat = "";                               # AT clause for SQL to all TEMSes
 my $tems_hub_nodeid = "";                      # nodeid of hub;
 
+my %extmslx = ();
+   $extmslx{'LZ'} = ["*LINUX_SYSTEM"];
+   $extmslx{'UX'} = ["*ALL_UNIX"];
+   $extmslx{'NT'} = ["*NT_SYSTEM"];
+   $extmslx{'SY'} = ["*AGGREGATION_AND_PRUNING"];
+   $extmslx{'PA'} = ["*AFT_PERF_ANALYZER_WHSE_AGENT"];
+   $extmslx{'PX'} = ["*AIX_PREMIUM"];
+   $extmslx{'Q5'} = ["*MS_CLUSTER"];
+   $extmslx{'OQ'} = ["*MS_SQL_SERVER"];
+   $extmslx{'OR'} = ["*ALL_ORACLE"];
+   $extmslx{'LO'} = ["*IBM_KLO"];
+   $extmslx{'VM'} = ["*VMWARE_VI"];
+   $extmslx{'MQ'} = ["*MVS_MQM"];
+   $extmslx{'UL'} = ["*UNIX_LOG_ALERT"];
+   $extmslx{'PK'} = ["*CEC_BASE"];
+   $extmslx{'UM'} = ["*UNIVERSAL"];
+   $extmslx{'OY'} = ["*ALL_SYBASE"];
+   $extmslx{'EX'} = ["*NT_EXCHANGE"];
+   $extmslx{'VA'} = ["*VIOS_PREMIUM"];
+   $extmslx{'QX'} = ["*CITRIX_PRES_SVR"];
+   $extmslx{'CQ'} = ["*TEPS"];
+   $extmslx{'PH'} = ["*HMC_BASE"];
+   $extmslx{'YN'} = ["*ITCAM_WEBSPHERE_AGENT","*CAM_WAS_SERVER","*CAM_WAS_PORTAL_SERVER"];
+   $extmslx{'HD'} = ["*WAREHOUSE_PROXY"];
+   $extmslx{'CF'} = ["*GENERIC_CONFIG"];
+   $extmslx{'R9'} = ["*BSM_CIRA_AGENT"];
+
+
 
 # variables for getting product information from the node status table
 
@@ -241,6 +271,7 @@ my @prodsits = ();
 # might be just one of course...
 
 my $got_connection = 0;
+my $num_connections = $#connections;
 
 foreach my $c (@connections) {
    #  Convert $connection as supplied by ini file into a connection string usable for soap processing
@@ -262,7 +293,6 @@ foreach my $c (@connections) {
 
 
 $oHub->transport->add_handler( request_send => sub {
-#$DB::single=2;
     return if $opt_vt == 0;
     my $req = shift;
     my $cur_time = time;
@@ -273,7 +303,6 @@ $oHub->transport->add_handler( request_send => sub {
   }
 );
 $oHub->transport->add_handler( response_header => sub {
-#$DB::single=2;
     return if $opt_vt == 0;
     my $cur_time = time;
     my $res = shift;
@@ -292,17 +321,15 @@ $oHub->transport->add_handler( response_data => sub {
        print $debugfile $res->content;
        print $debugfile "\n===   END HTTP RESPONSE DATA ===\n";
     }
-#$DB::single=2;
 #    if (substr($res->content,-20) eq "</SOAP-ENV:Envelope>") {
 #       die "OK"; # Got whole data, not waiting for server to end the communication channel.
 #    }
 #    return 1; # In other cases make sure the handler is called for subsequent chunks
      return 1; # allow next chunk to come it...
-}
-);
+
+});
 
 $oHub->transport->add_handler( response_done => sub {
-#$DB::single=2;
     my $res = shift;
     return if $opt_vt == 0;
     my $cur_time = time;
@@ -312,6 +339,24 @@ $oHub->transport->add_handler( response_done => sub {
     return
   }
 );
+
+   logit(0,"Survey trial of connection $connection - determine hub TEMS nodeid");
+   $sSQL = "SELECT NODE, THRUNODE, HOSTADDR, VERSION FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT='EM' AND NODE=THRUNODE";
+   @list = DoSoap("CT_Get",$sSQL);
+   if ($run_status) {
+      $DB::single=2 if $opt_debug == 1;
+      $run_status = 0;
+      next;
+   }
+   next if $#list == -1;
+   $node = $list[0]-> {NODE};
+   $tems_hub_nodeid = $list[0]-> {NODE};
+
+   if ($num_connections == 0) {
+      logit(0,"Skip FTO primary node check - only one soap target");
+      $got_connection = 1;
+      last;
+   }
 
    # check to see if if TGBLBRKR table is available - present on ITM 622 and later
    logit(0,"Survey trial of connection $connection - check for TGBLBRKR presence");
@@ -339,14 +384,10 @@ $oHub->transport->add_handler( response_done => sub {
    }
    next if $#list == -1;
    $node = $list[0]-> {NODE};
+   $tems_hub_nodeid = $list[0]-> {NODE};
    logit(0,"Survey trial of connection $connection TEMS $node - determine if hub TEMS is in primary role");
-#  $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR AT( '$node' ) WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
-   $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
-#  $save_timeout=$oHub->timeout;
-#  $oHub->timeout(10);
+   $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$tems_hub_nodeid\'";
    @list = DoSoap("CT_Get",$sSQL);
-   $oHub->timeout($save_timeout);
-   $save_timeout=$oHub->timeout(10);
    if ($run_status) {
       $DB::single=2 if $opt_debug == 1;
       $run_status = 0;
@@ -362,7 +403,6 @@ if ($got_connection != 1) {
    logit(0,"Survey - no primary hub TEMS found - ending survey");
    dumplogexit;
 }
-dumplog;
 
 
 # static analysis of the TEMS
@@ -370,7 +410,6 @@ dumplog;
 logit(0,"Survey tems_node_analysis start");
 $rc=tems_node_analysis();
 logit(0,"Survey tems_node_analysis end");
-dumplog;
 
 my $in_id;
 my $in_datetime;
@@ -380,51 +419,54 @@ for (my $t=0; $t<=$temsi; $t++) {
    my $at_tems = $tems[$t];
    for (my $p=0; $p<=$xprodi; $p++) {
       my $at_product = $xprod[$p];
-      my $at_nodelist = $xprod_msl[$p];
-      logit(100,"working on $at_tems $at_product $at_nodelist");
-      if ($at_nodelist eq ""){
-         logit(10,"working on product[$at_product] null nodelist");
-         next;
-      }
-      next if $at_nodelist eq "";
-      $key = $at_tems . "_" . $at_product;
-      logit(10,"working on $key nodelist[$at_nodelist] product_index[$p] tems[$at_tems] tems_index[$t]");
-      $ptx = $pxprodx{$key};
-      next if !defined  $ptx;
-      next if $pxprod_count[$ptx] == 0;
-      $tlen = length($nodelist);
-      $tlen1 = length($opt_agent_timeout);
-      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$at_tems') WHERE SYSTEM.PARMA('NODELIST','$at_nodelist',$tlen ) AND SYSTEM.PARMA('TIMEOUT','$opt_agent_timeout',$tlen1) AND ID='KRALOG000';";
-      @list = DoSoap("CT_Get",$sSQL);
+      my @at_nodelists = @{$xprod_msl[$p]};
 
-      # ignore errors
-      if ($run_status == 0) {
-         logit(0,"received $pcount responses for $at_nodelist at tems[$at_tems] product[$at_product]");
-         if ($#list >= 0) {
-            $pcount = $#list + 1;
-            $ll = 0;
-            foreach my $r (@list) {
-               $ll++;
-               my $count = scalar(keys %$r);
-               if ($count < 3) {
-                  logit(10,"working on OPLOG results row $ll of $pcount has $count instead of expected 3 keys");
-                  next;
-               }
-               my $in_id = $r->{ID};
-               $in_id =~ s/\s+$//;   #trim trailing whitespace
-               $in_datetime = $r->{DATETIME};
-               $in_datetime =~ s/\s+$//;   #trim trailing whitespace
-               $in_node = $r->{System_Name};
-               $in_node =~ s/\s+$//;   #trim trailing whitespace
-               logit(90,"working on $ll $in_node $in_id");
-               $sx = $snodex{$in_node};
-               next if !defined $sx;
-               next if $snode_agent_interested[$sx] == 0;
-               $snode_agent_responsive[$sx] = 1
-            } # next entries
-         } # some entries
-      } # bad soap return
-      dumplog;
+      for (my $m=0;$m<=$#at_nodelists; $m++) {
+         my $at_nodelist = $at_nodelists[$m];
+         logit(100,"working on $at_tems $at_product $at_nodelist");
+         if ($at_nodelist eq ""){
+            logit(10,"working on product[$at_product] null nodelist");
+            next;
+         }
+         next if $at_nodelist eq "";
+         $key = $at_tems . "_" . $at_product;
+         logit(10,"working on $key nodelist[$at_nodelist] product_index[$p] tems[$at_tems] tems_index[$t]");
+         $ptx = $pxprodx{$key};
+         next if !defined  $ptx;
+         next if $pxprod_count[$ptx] == 0;
+         $tlen = length($at_nodelist);
+         $tlen1 = length($opt_agent_timeout);
+         $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$at_tems') WHERE SYSTEM.PARMA('NODELIST','$at_nodelist',$tlen ) AND SYSTEM.PARMA('TIMEOUT','$opt_agent_timeout',$tlen1) AND ID='KRALOG000';";
+         @list = DoSoap("CT_Get",$sSQL);
+
+         # ignore errors
+         if ($run_status == 0) {
+            $pcount = $#list+1;
+            logit(0,"received $pcount responses for $at_nodelist at tems[$at_tems] product[$at_product]");
+            if ($#list >= 0) {
+               $ll = 0;
+               foreach my $r (@list) {
+                  $ll++;
+                  my $count = scalar(keys %$r);
+                  if ($count < 3) {
+                     logit(10,"working on OPLOG results row $ll of $pcount has $count instead of expected 3 keys");
+                     next;
+                  }
+                  my $in_id = $r->{ID};
+                  $in_id =~ s/\s+$//;   #trim trailing whitespace
+                  $in_datetime = $r->{DATETIME};
+                  $in_datetime =~ s/\s+$//;   #trim trailing whitespace
+                  $in_node = $r->{System_Name};
+                  $in_node =~ s/\s+$//;   #trim trailing whitespace
+                  logit(91,"working on $ll $in_node $in_id");
+                  $sx = $snodex{$in_node};
+                  next if !defined $sx;
+                  next if $snode_agent_interested[$sx] == 0;
+                  $snode_agent_responsive[$sx] = 1
+               } # next entries
+            } # some entries
+         } # bad soap return
+      } # next msl
    } # next product
 } # next TEMS
 
@@ -435,7 +477,6 @@ if ($opt_noretry == 0) {
       next if $snode_agent_responsive[$i] == 1;
       logit(0,"working on agent[$snode[$i]] $i of $snodei");
       my $tlen = length($opt_agent_timeout);
-#      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
       $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE  SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
       @list = DoSoap("CT_Get",$sSQL);
       # note errors but continue on
@@ -454,7 +495,6 @@ if ($opt_noretry == 0) {
             }
          }
       }
-      dumplog;
    }
 }
 
@@ -490,8 +530,31 @@ for (my $i=0; $i<=$snodei; $i++) {
       $total_retries += 1 if $snode_agent_retry[$i] == 1;
    }
 }
-$rlinei++;$rline[$rlinei]="\n";
+
 if ($total_retries > 0) {
+   $rlinei++;$rline[$rlinei]="\n";
+   $rlinei++;$rline[$rlinei]="Responsive agents needing retries\n";
+   $rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Hostaddr\n";
+   for (my $i=0; $i<=$snodei; $i++) {
+      next if $snode_agent_responsive[$i] == 0;
+      next if $snode_agent_retry[$i] == 0;
+      $outline = "$snode[$i],";
+      $outline .= "$snode_tems_thrunode[$i],";
+      $outline .= "$snode_tems_version[$i],";
+      $outline .= "$snode_tems_product[$i],";
+      $outline .= "$snode_agent_version[$i],";
+      @words = split(";",$snode_agent_common[$i]);
+      @words = split(":",$words[1]);
+      my $p_ver = substr($words[0],2,8);
+      $outline .= "$p_ver,";
+      $total_oplog1 += 1;
+      $outline .= "$snode_tems_hostaddr[$i],";
+      $rlinei++;$rline[$rlinei]="$outline\n";
+   }
+}
+
+if ($total_oplog1 > 0) {
+   $rlinei++;$rline[$rlinei]="\n";
    $rlinei++;$rline[$rlinei]="Responsive agents with invalid oplog first line\n";
    $rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Oplog1,Hostaddr\n";
    for (my $i=0; $i<=$snodei; $i++) {
@@ -536,7 +599,7 @@ for (my $i=0; $i<=$rlinei; $i++) {
 }
 close OH;
 
-dumplog;
+close FH;
 
 exit 0;
 
@@ -788,7 +851,7 @@ sub tems_node_analysis
    my $name;
 
    # get names of online TEMSes
-   $sSQL = "SELECT NODE,THRUNODE,HOSTADDR,VERSION,HOSTINFO FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT='EM'";
+   $sSQL = "SELECT NODE,THRUNODE,HOSTADDR,VERSION,HOSTINFO FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT='EM' AND THRUNODE = '$tems_hub_nodeid'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
 
@@ -920,7 +983,7 @@ sub tems_node_analysis
        $ptx = $temsx{$thrunode};
        $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] == 0;
 
-       # record the first agent for each product type. Will be used to determine system generated
+       # record the first agent for each unknown product type. Will be used to determine system generated
        # managed systemlist later on.
        $ptx = $xprodx{$product};
        if (!defined $ptx) {
@@ -930,11 +993,16 @@ sub tems_node_analysis
           $xprodx{$product} = $ptx;
           $xprodn{$node} = $ptx;
           $xprod_agent[$ptx] = $node;
-          $xprod_msl[$ptx] = "";
-          if ($samp_nodes eq "") {
-             $samp_nodes .= "NODE='$node'";
+          my $ex = $extmslx{$product};
+          if (defined $ex) {
+             $xprod_msl[$ptx] = $ex;
           } else {
-             $samp_nodes .= " OR NODE='$node'";
+             $xprod_msl[$ptx] = ();
+             if ($samp_nodes eq "") {
+                $samp_nodes .= "NODE='$node'";
+             } else {
+                $samp_nodes .= " OR NODE='$node'";
+             }
           }
        }
 
@@ -952,30 +1020,34 @@ sub tems_node_analysis
        $pxprod_count[$ptx] += 1;
        logit(100,"Node $snodei $node product[$snode_tems_product[$snx]] thrunode[[$snode_tems_thrunode[$snx]] hostaddr[[$snode_tems_hostaddr[$snx]]  agent_version[$snode_agent_version[$snx]]  agent_common[$snode_agent_common[$snx]]");
    }
-   # Get TNODELST data to figure out what the system generated MSL name is for each product
-   $sSQL = "SELECT NODE, NODELIST, NODETYPE FROM O4SRV.TNODELST WHERE $samp_nodes AND NODETYPE='M'";
-   @list = DoSoap("CT_Get",$sSQL);
-   if ($run_status) { exit 1;}
-   $ll = 0;
-   $pcount = $#list+1;
-   foreach my $r (@list) {
-       $ll++;
-       my $count = scalar(keys %$r);
-       if ($count < 3) {
-          logit(10,"working on TNODELST results row $ll of $pcount has $count instead of expected 3 keys");
-          next;
-       }
-       $node = $r->{NODE};
-       $node =~ s/\s+$//;   #trim trailing whitespace
-       $nodelist = $r->{NODELIST};
-       $nodelist =~ s/\s+$//;   #trim trailing whitespace
-       next if substr($nodelist,0,1) ne "*";
-       $ptx = $xprodn{$node};
-       $xprod_msl[$ptx] = $nodelist if defined $ptx;
+   if ($samp_nodes ne "") {
+      # Get TNODELST data to figure out what the system generated MSL name is for each product
+      $sSQL = "SELECT NODE, NODELIST, NODETYPE FROM O4SRV.TNODELST WHERE $samp_nodes AND NODETYPE='M'";
+      @list = DoSoap("CT_Get",$sSQL);
+      if ($run_status) { exit 1;}
+      $ll = 0;
+      $pcount = $#list+1;
+      foreach my $r (@list) {
+          $ll++;
+          my $count = scalar(keys %$r);
+          if ($count < 3) {
+             logit(10,"working on TNODELST results row $ll of $pcount has $count instead of expected 3 keys");
+             next;
+          }
+          $node = $r->{NODE};
+          $node =~ s/\s+$//;   #trim trailing whitespace
+          $nodelist = $r->{NODELIST};
+          $nodelist =~ s/\s+$//;   #trim trailing whitespace
+          next if substr($nodelist,0,1) ne "*";
+          $ptx = $xprodn{$node};
+          if (defined $ptx) {
+             @xprod_msls = ();
+             push(@xprod_msls,$nodelist);
+             $xprod_msl[$ptx] = \@xprod_msls;
+          }
+      }
    }
 
-  dumplog;
-  @log = ();
 }
 
 
@@ -1104,14 +1176,10 @@ if (substr($res,0,6) eq "<HTML>") {
 #  print STDERR "INFO" . "SOAP Call submitted successfully\n";
 if (91 <= $opt_debuglevel) {
    logit(91,"INFO result res[$res]");
-   dumplog;
-   @log = ();
 }
 
 if ($opt_dpr == 1) {
    if (91 <= $opt_debuglevel) {
-      dumplog;
-      @log = ();
       datadumperlog("Data:Dumper of \$res","$res");
    }
 }
@@ -1131,8 +1199,6 @@ if ($@) {
 
 if ($opt_dpr == 1) {
    if (91 <= $opt_debuglevel) {
-      dumplog;
-      @log = ();
       datadumperlog("Data:Dumper of \$result","\$result");
    }
 }
@@ -1146,7 +1212,6 @@ if ($rt eq "HASH") {
       $soap_faultcode = $result->{'SOAP-ENV:Envelope'}->{'SOAP-ENV:Body'}->{'SOAP-ENV:Fault'}->{'faultcode'};
       logit(0,"ERROR SOAP - $soap_faultcode $soap_faultstr");
       if ($soap_faultstr eq "CMS logon validation failed.") {
-         dumplog;
          die "Logon userid/password invalid, please correct" if $soap_faultstr eq "CMS logon validation failed.";
       }
       $run_status++;
@@ -1180,8 +1245,6 @@ if ($rt eq "HASH") {
 
 if ($opt_dpr == 1) {
    if (91 <= $opt_debuglevel) {
-      dumplog;
-      @log = ();
       datadumperlog("Data:Dumper of \@results2","\@results2");
    }
 }
@@ -1246,8 +1309,8 @@ sub logit
             $oline = $ofile . ":" . $olino . " " . $oline;
          }
       }
-      push(@log, $oline);
-      print $oline . "\n" if $opt_v == 1;
+      print FH "$oline\n";
+      print "$oline\n" if $opt_v == 1;
    }
 }
 
@@ -1258,18 +1321,10 @@ sub logit
 sub dumplogexit
 {
    logit(0,"SURVEY999E - total runtime errors = $run_status");
-   dumplog;
+   close FH;
    exit 1;
 }
 
-# write output log
-sub dumplog
-{
-   open FH, ">>$opt_log" or die "can't open '$opt_log': $!";
-   foreach ( @log ) { print FH $_ . "\n";}
-   close FH;
-   @log = ();
-}
 
 # write output log
 sub datadumperlog
@@ -1277,11 +1332,9 @@ sub datadumperlog
    require Data::Dumper;
    my $dd_msg = shift;
    my $dd_var = shift;
-   open FH, ">>$opt_log" or die "can't open '$opt_log': $!";
    print FH "$dd_msg\n";
    no strict;
    print FH Data::Dumper->Dumper($dd_var);
-   close FH;
 }
 
 # return timestamp
@@ -1675,3 +1728,7 @@ $run_status++;
 # 0.30000  : add retry logic, check for invalid oplog
 # 0.60000  : retry defaulted to on, noretry added to turn off
 #          : Check for valid number of returned hash entries
+# 0.70000  : fix soapurl input
+# 0.75000  : pre-define many nodelists
+#            fixup add_handler function
+#            handle multiple nodelists for a single product
