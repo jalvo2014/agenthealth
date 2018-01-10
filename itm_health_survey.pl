@@ -22,7 +22,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.50000";
+my $gVersion = "0.60000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 BEGIN {
@@ -35,13 +35,18 @@ my $zombie_start = time;
 #  use warnings::unused; # installs the check routine as 'once'
 #  use warnings 'once';  # enables  the check routine
 
+
 use DateTime;                   # Computing with Date Time
-#use SOAP::Lite +trace => 'all';                 # simple SOAP processing. add 'debug' to increase tracing
+#use SOAP::Lite +trace => 'all';        # simple SOAP processing. add 'debug' to increase tracing
 use SOAP::Lite;                 # simple SOAP processing. add 'debug' to increase tracing
 use HTTP::Request::Common;      #   and HTTP - for SOAP processing
 use XML::TreePP;                # parse XML
-use Module::Load;               # more flexible
-use Data::Dumper;               # debug only
+#use Module::Load;               # more flexible
+#use Data::Dumper;               # debug only
+#use LWP::UserAgent;
+#use LWP::Debug;
+#LWP::Debug::level('+');
+#SOAP::Lite->import(+trace => 'all');
 
 # following object used to parse SOAP results and xml files.
 # Originally XML::Simple was used but it malfunctioned on one platform.
@@ -56,7 +61,6 @@ my $soap_faultstr;                     # fault string from SOAP results
 my $soap_faultcode;                    # fault code - where the fault originates
 my $run_status = 0;                    # A count of pending runtime errors - used to allow multiple error detection before stopping process
 my $oHub;                              # SOAP::Lite object to define connection
-my $review_survey_timeout;
 
 # some common variables
 
@@ -79,6 +83,9 @@ my $tlen;
 my $tlen1;
 my $key;
 my $save_timeout;
+my $debugfile;
+my $ll;
+my $pcount;
 
 # forward declarations of subroutines
 
@@ -107,17 +114,16 @@ my $opt_debuglevel;             # Debug level
 my $opt_debug;                  # Debug level
 my $opt_h;                      # help file
 my $opt_v;                      # verbose flag
+my $opt_vt;                     # verbose traffic flag
 my @opt_pc = ();                # Product codes - like ux for Unix OS Agent
 my %opt_pcx = ();               # index to Product codes
 my @opt_tems = ();              # TEMS names to survey
 my %opt_temsx = ();             # index to TEMS names
 my $opt_dpr;                    # dump data structure flag
 my $opt_std;                    # Credentials from standard input
-my $opt_agent;                  # Review one agent and then stop
-my $opt_group_num;              # number of agents to query at one time
 my $opt_agent_timeout;          # How long to wait for agents
 my $opt_soap_timeout;           # How long to wait SOAP request
-my $opt_retry;                  # when 0, retry non-responsive agents
+my $opt_noretry;                # when 1 do not retry problem agents
 my $opt_retry_timeout;          # delay time during retry, default 15
 my $opt_o;                      # output file
 
@@ -128,16 +134,14 @@ my $passwd="";
 #
 my @connections = ();               # list of possible hub TEMS servers
 my $connection="";                  # one particular connection
-my $history_path = "./";
-my $review_tems_time      = 0;      # time of last TEMS static review
 
-my $cmd;
-my $cmd_file;
-my $cmd_work;
-my $cmd_file_local;
-my $cmd_work_local;
 
 $rc = init($args_start);
+
+if ($opt_vt == 1) {
+   open $debugfile, '>traffic.txt' or die "can't open 'traffic.txt': $!";;
+   $debugfile->autoflush(1);
+}
 
 logit(0,"SURVEY000I - ITM_Zombie_Survey $gVersion $args_start");
 
@@ -256,6 +260,60 @@ foreach my $c (@connections) {
    $oHub->outputxml('true');
    $oHub->on_fault( sub {});      # pass back all errors
 
+
+$oHub->transport->add_handler( request_send => sub {
+#$DB::single=2;
+    return if $opt_vt == 0;
+    my $req = shift;
+    my $cur_time = time;
+    print $debugfile "\n$cur_time === BEGIN HTTP REQUEST ===\n";
+    print $debugfile $req->dump(maxlength=>0);
+    print $debugfile "\n$cur_time ===   END HTTP REQUEST ===\n";
+    return
+  }
+);
+$oHub->transport->add_handler( response_header => sub {
+#$DB::single=2;
+    return if $opt_vt == 0;
+    my $cur_time = time;
+    my $res = shift;
+    print $debugfile "\n$cur_time === BEGIN RESPONSE HDRS ===\n";
+    print $debugfile $res->dump(maxlength=>0);
+    print $debugfile "\n$cur_time === END RESPONSE HDRS ===\n";
+    return
+  }
+);
+$oHub->transport->add_handler( response_data => sub {
+    my $res = shift;
+    my $cur_time = time;
+    if ($opt_vt == 1) {
+       my $content_length = length($res->content);
+       print $debugfile "\n$cur_time === BEGIN HTTP RESPONSE DATA $content_length ===\n";
+       print $debugfile $res->dump(maxlength=>0);
+#      print $debugfile $res->content;
+       print $debugfile "\n===   END HTTP RESPONSE DATA ===\n";
+    }
+#$DB::single=2;
+#    if (substr($res->content,-20) eq "</SOAP-ENV:Envelope>") {
+#       die "OK"; # Got whole data, not waiting for server to end the communication channel.
+#    }
+#    return 1; # In other cases make sure the handler is called for subsequent chunks
+     return 1; # allow next chunk to come it...
+}
+);
+
+$oHub->transport->add_handler( response_done => sub {
+#$DB::single=2;
+    my $res = shift;
+    return if $opt_vt == 0;
+    my $cur_time = time;
+    print $debugfile "\n$cur_time === BEGIN HTTP RESPONSE DONE ===\n";
+    print $debugfile $res->dump(maxlength=>0);
+    print $debugfile "\n===   END HTTP RESPONSE DONE ===\n";
+    return
+  }
+);
+
    # check to see if if TGBLBRKR table is available - present on ITM 622 and later
    logit(0,"Survey trial of connection $connection - check for TGBLBRKR presence");
    $sSQL = "SELECT TABL_NAME FROM SYSTEM.SYSTABLES WHERE TABL_NAME='TGBLBRKR'";
@@ -285,8 +343,8 @@ foreach my $c (@connections) {
    logit(0,"Survey trial of connection $connection TEMS $node - determine if hub TEMS is in primary role");
 #  $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR AT( '$node' ) WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
    $sSQL = "SELECT ADDRESS, ANNOT, ENTRTYPE, PORT, PROTOCOL, ORIGINNODE FROM O4SRV.TGBLBRKR WHERE ENTRTYPE = 1 AND ORIGINNODE = \'$node\'";
-   $save_timeout=$oHub->timeout;
-   $oHub->timeout(10);
+#  $save_timeout=$oHub->timeout;
+#  $oHub->timeout(10);
    @list = DoSoap("CT_Get",$sSQL);
    $oHub->timeout($save_timeout);
    $save_timeout=$oHub->timeout(10);
@@ -305,6 +363,7 @@ if ($got_connection != 1) {
    logit(0,"Survey - no primary hub TEMS found - ending survey");
    dumplogexit;
 }
+dumplog;
 
 
 # static analysis of the TEMS
@@ -312,6 +371,7 @@ if ($got_connection != 1) {
 logit(0,"Survey tems_node_analysis start");
 $rc=tems_node_analysis();
 logit(0,"Survey tems_node_analysis end");
+dumplog;
 
 my $in_id;
 my $in_datetime;
@@ -322,13 +382,14 @@ for (my $t=0; $t<=$temsi; $t++) {
    for (my $p=0; $p<=$xprodi; $p++) {
       my $at_product = $xprod[$p];
       my $at_nodelist = $xprod_msl[$p];
+      logit(100,"working on $at_tems $at_product $at_nodelist");
       if ($at_nodelist eq ""){
          logit(10,"working on product[$at_product] null nodelist");
          next;
       }
       next if $at_nodelist eq "";
       $key = $at_tems . "_" . $at_product;
-      logit(10,"working on $key nodelist[$nodelist] product_index[$p] tems[$at_tems] tems_index[$t]");
+      logit(10,"working on $key nodelist[$at_nodelist] product_index[$p] tems[$at_tems] tems_index[$t]");
       $ptx = $pxprodx{$key};
       next if !defined  $ptx;
       next if $pxprod_count[$ptx] == 0;
@@ -339,16 +400,24 @@ for (my $t=0; $t<=$temsi; $t++) {
 
       # ignore errors
       if ($run_status == 0) {
-         my $pcount = $#list + 1;
-         logit(0,"received $pcount responses for $nodelist at tems[$at_tems] product[$at_product]");
+         logit(0,"received $pcount responses for $at_nodelist at tems[$at_tems] product[$at_product]");
          if ($#list >= 0) {
+            $pcount = $#list + 1;
+            $ll = 0;
             foreach my $r (@list) {
+               $ll++;
+               my $count = scalar(keys %$r);
+               if ($count < 3) {
+                  logit(10,"working on OPLOG results row $ll of $pcount has $count instead of expected 3 keys");
+                  next;
+               }
                my $in_id = $r->{ID};
                $in_id =~ s/\s+$//;   #trim trailing whitespace
                $in_datetime = $r->{DATETIME};
                $in_datetime =~ s/\s+$//;   #trim trailing whitespace
                $in_node = $r->{System_Name};
                $in_node =~ s/\s+$//;   #trim trailing whitespace
+               logit(90,"working on $ll $in_node $in_id");
                $sx = $snodex{$in_node};
                next if !defined $sx;
                next if $snode_agent_interested[$sx] == 0;
@@ -356,17 +425,19 @@ for (my $t=0; $t<=$temsi; $t++) {
             } # next entries
          } # some entries
       } # bad soap return
+      dumplog;
    } # next product
 } # next TEMS
 
 # if wanted, redo the non-responsive ones individually...
-if ($opt_retry == 1) {
+if ($opt_noretry == 0) {
    for (my $i=0; $i<=$snodei; $i++) {
       next if $snode_agent_interested[$i] == 0;
       next if $snode_agent_responsive[$i] == 1;
       logit(0,"working on agent[$snode[$i]] $i of $snodei");
       my $tlen = length($opt_agent_timeout);
-      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
+#      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE SYSTEM.PARMA('NODELIST','*ALL',4 ) AND SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
+      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE  SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
       @list = DoSoap("CT_Get",$sSQL);
       # note errors but continue on
       if ($run_status == 0) {
@@ -384,9 +455,8 @@ if ($opt_retry == 1) {
             }
          }
       }
-
+      dumplog;
    }
-   dumplog;
 }
 
 
@@ -459,7 +529,7 @@ print OH "Total Responsive agents needing retry,$total_retries,\n";
 print OH "Total Zombie agents,$total_nonresponsive,\n";
 print OH "Total Invalid Oplog agents,$total_oplog1,\n";
 print OH "\n";
-print OH "Zombie Agents\n";
+print OH "Possible Zombie Agents\n";
 print OH "Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Hostaddr\n";
 
 for (my $i=0; $i<=$rlinei; $i++) {
@@ -485,19 +555,18 @@ sub init {
               'user=s' => \$user,                     # userid
               'passwd=s' => \$passwd,                 # password
               'debuglevel=i' => \ $opt_debuglevel,    # log file contents control
-              'group_num=i' => \ $opt_group_num,      # Number of agents to query at one time
               'agent_timeout=i' => \ $opt_agent_timeout, # Agent timeout
               'debug' => \ $opt_debug,                # log file contents control
               'h' => \ $opt_h,                        # help
               'v' => \  $opt_v,                       # verbose - print immediately as well as log
-              'retry' => \  $opt_retry,               # retry failures one by one
+              'vt' => \  $opt_vt,                     # verbose traffic - print traffic.txt
+              'noretry' => \  $opt_noretry,             # retry failures one by one
               'retry_timeout=i' => \ $opt_retry_timeout, # retry failures one by one
               'o=s' => \ $opt_o,                      # output file
               'pc=s' => \  @opt_pc,                   # Product Code
               'tems=s' => \  @opt_tems,               # TEMS names
               'dpr' => \ $opt_dpr,                    # dump data structures
-              'std' => \ $opt_std,                    # credentials from standard input
-              'agent=s' => \ $opt_agent              # Single agent survey
+              'std' => \ $opt_std                    # credentials from standard input
              );
    # if other things found on the command line - complain and quit
    @myargs_remain_array = @$myargs_remain;
@@ -540,8 +609,9 @@ sub init {
        if ($#words == 0) {                         # single word parameters
          if ($words[0] eq "debug") {$opt_debug = 1;}
          elsif ($words[0] eq "verbose") {$opt_v = 1;}
+         elsif ($words[0] eq "traffic") {$opt_vt = 1;}
          elsif ($words[0] eq "std") {$opt_std = 1;}
-         elsif ($words[0] eq "retry") {$opt_retry = 1;}
+         elsif ($words[0] eq "noretry") {$opt_noretry = 1;}
          elsif ($words[0] eq "passwd") {}                      # null password
          else {
             logit(0,"SURVEY003E Control without needed parameters $words[0] - $opt_ini [$l]");
@@ -558,12 +628,10 @@ sub init {
       elsif ($words[0] eq "log") {$opt_log = $words[1];}
       elsif ($words[0] eq "pc") {push(@opt_pc,$words[1]);}
       elsif ($words[0] eq "tems") {push(@opt_tems,$words[1]);}
-      elsif ($words[0] eq "agent") {$opt_agent = $words[1];}
-      elsif ($words[0] eq "group_num") {$opt_group_num = $words[1];}
       elsif ($words[0] eq "agent_timeout") {$opt_agent_timeout = $words[1];}
+      elsif ($words[0] eq "retry_timeout") {$opt_retry_timeout = $words[1];}
       elsif ($words[0] eq "o") {$opt_o = $words[1];}
       elsif ($words[0] eq "soap_timeout") {$opt_soap_timeout = $words[1];}
-      elsif ($words[0] eq "history_path") {$history_path = $words[1];}
       else {
          logit(0,"SURVEY005E ini file $l - unknown control $words[0]"); # kill process after current phase
          $run_status++;
@@ -575,17 +643,15 @@ sub init {
    if (!defined $opt_log) {$opt_log = "zombie.log";}           # default log file if not specified
    if (!defined $opt_h) {$opt_h=0;}                            # help flag
    if (!defined $opt_v) {$opt_v=0;}                            # verbose flag
-   if (!defined $opt_agent){$opt_agent="";}                    # Single survey agent
+   if (!defined $opt_vt) {$opt_vt=0;}                          # verbose traffic default off
    if (!defined $opt_dpr) {$opt_dpr=0;}                        # data dump flag
    if (!defined $opt_std) {$opt_std=0;}                        # default - no credentials in stdin
-   if (!defined $opt_group_num) {$opt_group_num=100;}          # default 100 agents queried at a time
    if (!defined $opt_agent_timeout) {$opt_agent_timeout=50;}   # default 50 seconds
    if (!defined $opt_soap_timeout) {$opt_soap_timeout=180;}    # default 180 seconds
-   if (!defined $opt_retry) {$opt_retry=0;}                    # default to no retry
+   if (!defined $opt_noretry) {$opt_noretry=0;}                  # default to retry
    if (!defined $opt_retry_timeout) {$opt_retry_timeout=15;}           # default 15 second retry
    if (!defined $opt_o) {$opt_o="zombie.csv";}                 # default output file
 
-   $review_survey_timeout = $opt_soap_timeout;    # how many seconds to wait for a response
 
    # collect the TEMSes information into an array
    foreach my $t (@opt_tems) {$opt_temsx{$t} = 1;}
@@ -647,21 +713,11 @@ sub init {
    # this way we can show multiple errors at startup
    if ($run_status) { dumplogexit;}
 
-   $history_path =~ s/\\/\//g;
-   $history_path .= "\/" if substr($history_path,length($history_path)-1,1) ne "\/";
-   $opt_log = "$history_path" . "$opt_log";
-   $cmd_file = $history_path . "zombie.req";
-   $cmd_work = $history_path . "zombie.wrk";
-   $cmd_file_local = $cmd_file;
-   $cmd_work_local = $cmd_work;
-   $cmd_file_local =~ s/\//\\/g;
-   $cmd_work_local =~ s/\//\\/g;
 }
 
 sub tems_node_analysis
 {
    $survey_tems++;
-   $review_tems_time = time;
 
    # local variables
    my $node_filebase;
@@ -700,7 +756,7 @@ sub tems_node_analysis
    @snode_survey_actions = ();
    @snode_agent_responsive = ();               # when 1, node was responsive
    @snode_agent_interested = ();               # when 1, node is being checked
-   @snode_agent_retry      = ();               # when 1, retry needed
+   @snode_agent_retry      = ();               # when 1, retry used
    @snode_agent_oplog1     = ();               # when non-null, invalid first oplog record
 
    $temsi = -1;
@@ -806,7 +862,15 @@ sub tems_node_analysis
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
 
+   $ll = 0;
+   $pcount = $#list+1;
    foreach my $r (@list) {
+       $ll++;
+       my $count = scalar(keys %$r);
+       if ($count < 6) {
+          logit(10,"working on INODESTS row $ll of $pcount has $count instead of expected 6 keys");
+          next;
+       }
        $node = $r->{NODE};
        $node =~ s/\s+$//;   #trim trailing whitespace
        my $thrunode = $r->{THRUNODE};
@@ -843,7 +907,7 @@ sub tems_node_analysis
        $snode_agent_common[$snx] = $agent_common;
        $snode_agent_responsive[$snx] = 0;           # non-responsive until tested
        $snode_agent_interested[$snx] = 1;           # interested unless product values set
-       $snode_agent_retry[$snx]      = 0;           # retry needed
+       $snode_agent_retry[$snx]      = 0;           # When 1, retry performed
        $snode_agent_oplog1[$snx]     = "";          # invalid first oplog entry
        if ($#opt_pc != -1) {                        # if product codes set, only interested in those
           $ptx = $opt_pcx{$product};
@@ -893,8 +957,15 @@ sub tems_node_analysis
    $sSQL = "SELECT NODE, NODELIST, NODETYPE FROM O4SRV.TNODELST WHERE $samp_nodes AND NODETYPE='M'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
-
+   $ll = 0;
+   $pcount = $#list+1;
    foreach my $r (@list) {
+       $ll++;
+       my $count = scalar(keys %$r);
+       if ($count < 3) {
+          logit(10,"working on TNODELST results row $ll of $pcount has $count instead of expected 3 keys");
+          next;
+       }
        $node = $r->{NODE};
        $node =~ s/\s+$//;   #trim trailing whitespace
        $nodelist = $r->{NODELIST};
@@ -1139,19 +1210,18 @@ sub GiveHelp
     debug        : 0  when 1 some breakpoints are enabled]
     h            : 0  display help information
     v            : 0  display log messages on console
+    vt           : 0  record http traffic on traffic.txt file
     pc           : product code of agents - can supply multiple codes
     tems         : tems the agents report to - can supply multiple code
     dpr          : 0  dump data structure if Dump::Data installed
     std          : 0  get user/password from stardard input
     agent        : <none> single agent survey and then stop
-    agent_oplog : <none> capture operations log from single agent and then stop
-    group_num    : number of agents to check at one time, default 100
     agent_timeout : seconds to wait for an agent response, default 50 seconds
-    retry         : after a detected failure, retry on each problem case, default off
+    noretry       : after a stage I failure, skip the retry on individual agents, default off
     retry_timeout : Agent timeout during retry - default 15 seconds
 
   Example invovation
-    $0  -ini <control file> -pc ux -limit 40
+    $0  -ini <control file> -pc ux
 
   Note: $0 uses an initialization file [default survey.ini] for many controls.
 
@@ -1443,7 +1513,7 @@ my $in_protocol;                     # protocol from index.xml results
       }
       $test_connection = $connect_protocol . "://" . $connect_hostName . ":" . $connect_port . "///cms/soap";
       logit(0,"Trial SOAP connection based on [$test_connection]");
-      $oHub = SOAP::Lite->proxy($test_connection,timeout => $review_survey_timeout);          # set Soap::Lite controls
+      $oHub = SOAP::Lite->proxy($test_connection,timeout => $opt_soap_timeout);          # set Soap::Lite controls
       $oHub->outputxml('true');                                                               # require xml output
       $oHub->on_fault( sub {});      # pass back all errors                                   # pass back error conditions
       $connect_res = DoSoap('CT_Get_Object','Local_System_Command');                          # attempt connection
@@ -1496,7 +1566,7 @@ my $in_protocol;                     # protocol from index.xml results
 
       $test_connection = $connect_protocol . "://" . $connect_hostName . ":" . $connect_port . "/kdh/index/index.xml";
       logit(0,"Attempt retrievel of index.xml file using [$test_connection]");
-      $oHub = SOAP::Lite->proxy($test_connection,timeout => $review_survey_timeout);
+      $oHub = SOAP::Lite->proxy($test_connection,timeout => $opt_soap_timeout);
       $oHub->outputxml('true');
       $oHub->on_fault( sub {});      # pass back all errors
       $connect_res = DoSoap('CT_Get_Object','Local_System_Command','raw');       # the 'raw' third parm means that DoSoap will not analyze results
@@ -1582,7 +1652,7 @@ my $in_protocol;                     # protocol from index.xml results
 
          $test_connection = $connect_protocol . "://" . $connect_hostName . ":" . $connect_port . "///cms/soap";
          logit(0,"Trial SOAP connection based index.xml [$test_connection]");
-         $oHub = SOAP::Lite->proxy($test_connection,timeout => $review_survey_timeout);
+         $oHub = SOAP::Lite->proxy($test_connection,timeout => $opt_soap_timeout);
          $oHub->outputxml('true');
          $oHub->on_fault( sub {});      # pass back all errors
          $connect_res = DoSoap('CT_Get_Object','Local_System_Command');
@@ -1604,3 +1674,5 @@ $run_status++;
 
 # 0.25000  : New script based on Agent Survey 3.40000
 # 0.30000  : add retry logic, check for invalid oplog
+# 0.60000  : retry defaulted to on, noretry added to turn off
+#          : Check for valid number of returned hash entries
