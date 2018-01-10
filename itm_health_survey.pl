@@ -267,7 +267,7 @@ $oHub->transport->add_handler( request_send => sub {
     my $req = shift;
     my $cur_time = time;
     print $debugfile "\n$cur_time === BEGIN HTTP REQUEST ===\n";
-    print $debugfile $req->dump(maxlength=>0);
+    print $debugfile $req->dump();
     print $debugfile "\n$cur_time ===   END HTTP REQUEST ===\n";
     return
   }
@@ -278,7 +278,7 @@ $oHub->transport->add_handler( response_header => sub {
     my $cur_time = time;
     my $res = shift;
     print $debugfile "\n$cur_time === BEGIN RESPONSE HDRS ===\n";
-    print $debugfile $res->dump(maxlength=>0);
+    print $debugfile $res->dump();
     print $debugfile "\n$cur_time === END RESPONSE HDRS ===\n";
     return
   }
@@ -289,8 +289,7 @@ $oHub->transport->add_handler( response_data => sub {
     if ($opt_vt == 1) {
        my $content_length = length($res->content);
        print $debugfile "\n$cur_time === BEGIN HTTP RESPONSE DATA $content_length ===\n";
-       print $debugfile $res->dump(maxlength=>0);
-#      print $debugfile $res->content;
+       print $debugfile $res->content;
        print $debugfile "\n===   END HTTP RESPONSE DATA ===\n";
     }
 #$DB::single=2;
@@ -308,7 +307,7 @@ $oHub->transport->add_handler( response_done => sub {
     return if $opt_vt == 0;
     my $cur_time = time;
     print $debugfile "\n$cur_time === BEGIN HTTP RESPONSE DONE ===\n";
-    print $debugfile $res->dump(maxlength=>0);
+    print $debugfile $res->dump();
     print $debugfile "\n===   END HTTP RESPONSE DONE ===\n";
     return
   }
