@@ -14,6 +14,7 @@
 #  jalvord@us.ibm.com
 #
 # tested on Windows Activestate 5.12.2
+# Should work on Linux/Unix but not yet tested
 #
 # $DB::single=2;   # remember debug breakpoint
 
@@ -22,15 +23,15 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.75000";
+my $gVersion = "0.80000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
+# communicate without certificates
 BEGIN {
    $ENV{'PERL_NET_HTTPS_SSL_SOCKET_CLASS'} = "Net::SSL";
    $ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
 };   #
 
-my $zombie_start = time;
 
 #  use warnings::unused; # installs the check routine as 'once'
 #  use warnings 'once';  # enables  the check routine
@@ -51,6 +52,7 @@ use XML::TreePP;                # parse XML
 # following object used to parse SOAP results and xml files.
 # Originally XML::Simple was used but it malfunctioned on one platform.
 my $tpp = XML::TreePP->new;
+
 
 # a collection of variables which are used throughout the program.
 # defined globally
@@ -86,13 +88,12 @@ my $key;
 my $debugfile;
 my $ll;
 my $pcount;
+my $px;
 
 # forward declarations of subroutines
 
 sub init;                                # read command line and ini file
 sub logit;                               # queue one record to survey log
-sub dumplogexit;                         # dump current log to disk file and exit
-sub survey_agent;                        # Survey one agent
 sub tems_node_analysis;                   # perform analysis of TEMS node status
 sub DoSoap;                              # perform a SOAP request and return results
 sub get_timestamp;                       # get current timestatmp
@@ -100,10 +101,10 @@ sub calc_timestamp;                      # Add or subtract time from an ITM time
 sub get_ITM_epoch;                       # convert from ITM timestamp to epoch seconds
 sub datadumperlog;                       # dump a variable using Dump::Data if installed
 sub get_connection;                      # get current connection string
+sub gettime;                             # get time
 
-# runtime Statistics variables
-my $survey_tems = 0;                     # count of times TEMS surveyed
-
+my $zombie_start = time;                 # decimal epoch time number
+my $zombie_start_time = gettime();       # formated current time for report
 
 # option and ini file variables variables
 
@@ -123,7 +124,8 @@ my $opt_std;                    # Credentials from standard input
 my $opt_agent_timeout;          # How long to wait for agents
 my $opt_soap_timeout;           # How long to wait SOAP request
 my $opt_noretry;                # when 1 do not retry problem agents
-my $opt_retry_timeout;          # delay time during retry, default 15
+my $opt_retry_timeout;          # delay time during retry/1, default 15
+my $opt_retry_timeout2;         # delay time during retry/2, default 50
 my $opt_o;                      # output file
 
 my $user="";
@@ -179,25 +181,18 @@ my @snodlnodes = ();
 my $snodei = -1;                               # count of nodes
 my @snode = ();                                # node names - managed system names
 my %snodex = ();                               # index to nodenames
-my %snode_filex = ();                          # index from *.review file to index
-my @snode_survey_online = ();                  # used to track offline conditions
-my @snode_survey_sits = ();                    # situations gotten from the survey - Run at Startup
-my @snode_persist_sits = ();                   # persist ituations gotten from the survey
-my @snode_survey_sits_noauto = ();             # situations gotten from the survey - not Run at Startup
 my @snode_tems_product = ();                   # Product Code [Agent type] the agent is associated with
 my @snode_tems_thrunode = ();                  # thrunode [remote TEMS for simple situations] the agent connects to
 my @snode_tems_version = ();                   # version of [remote TEMS for simple situations] the agent connects to
 my @snode_tems_hostaddr = ();                  # hostaddr information, include ip address
+my @snode_tems_zombie_ct = ();                 # count of zombies
 my @snode_agent_version = ();                  # version  information, include ip address
+my @snode_agent_arch = ();                     # system architecture of system running agent
 my @snode_agent_common  = ();                  # common software levels
-my @snode_survey_maxdelay = ();                # maximum time to last situation started
-my @snode_survey_maxdelay_situation = ();      # situation started
-my @snode_survey_connects = ();                # count of connects
-my @snode_survey_sitct = ();                   # count of situations running at the node
-my @snode_survey_actions = ();                 # count of situation start/stop actions at the node
 my @snode_agent_responsive = ();               # when 1, node was responsive
 my @snode_agent_interested = ();               # when 1, node is being checked
 my @snode_agent_retry      = ();               # when 1, retry needed
+my @snode_agent_retry_timeout = ();            # timeout needed
 my @snode_agent_oplog1     = ();               # when non-null, invalid first oplog record
 
 my $xprodi = -1;
@@ -207,11 +202,13 @@ my %xprodn = ();
 my @xprod_agent = ();
 my @xprod_msl = ();
 my @xprod_msls = ();
+my @xprod_zombie_ct = ();
 
 my $pxprodi = -1;
 my @pxprod = ();
 my %pxprodx = ();
 my @pxprod_count = ();
+my @pxprod_zombie_ct = ();
 
 my $tx;                                        # index
 my $temsi = -1;                                # count of TEMSes in survey
@@ -226,36 +223,38 @@ my @tems_vmsize = ();                          # current process size
 my @tems_cpubusy = ();                         # current process cpubusy
 my @tems_server_busy = ();                     # current server cpubusy
 my @tems_hostaddr = ();                        # current server host address
+my @tems_zombie_ct = ();                       # number of zombie agents
 my $temsat = "";                               # AT clause for SQL to all TEMSes
 my $tems_hub_nodeid = "";                      # nodeid of hub;
 
+# pre-stored product code to system generated Managed System List names
+# add more later
 my %extmslx = ();
+   $extmslx{'CF'} = ["*GENERIC_CONFIG"];
+   $extmslx{'CQ'} = ["*TEPS"];
+   $extmslx{'EX'} = ["*NT_EXCHANGE"];
+   $extmslx{'HD'} = ["*WAREHOUSE_PROXY"];
+   $extmslx{'LO'} = ["*IBM_KLO"];
    $extmslx{'LZ'} = ["*LINUX_SYSTEM"];
-   $extmslx{'UX'} = ["*ALL_UNIX"];
+   $extmslx{'MQ'} = ["*MVS_MQM"];
    $extmslx{'NT'} = ["*NT_SYSTEM"];
-   $extmslx{'SY'} = ["*AGGREGATION_AND_PRUNING"];
-   $extmslx{'PA'} = ["*AFT_PERF_ANALYZER_WHSE_AGENT"];
-   $extmslx{'PX'} = ["*AIX_PREMIUM"];
-   $extmslx{'Q5'} = ["*MS_CLUSTER"];
    $extmslx{'OQ'} = ["*MS_SQL_SERVER"];
    $extmslx{'OR'} = ["*ALL_ORACLE"];
-   $extmslx{'LO'} = ["*IBM_KLO"];
-   $extmslx{'VM'} = ["*VMWARE_VI"];
-   $extmslx{'MQ'} = ["*MVS_MQM"];
-   $extmslx{'UL'} = ["*UNIX_LOG_ALERT"];
-   $extmslx{'PK'} = ["*CEC_BASE"];
-   $extmslx{'UM'} = ["*UNIVERSAL"];
    $extmslx{'OY'} = ["*ALL_SYBASE"];
-   $extmslx{'EX'} = ["*NT_EXCHANGE"];
-   $extmslx{'VA'} = ["*VIOS_PREMIUM"];
-   $extmslx{'QX'} = ["*CITRIX_PRES_SVR"];
-   $extmslx{'CQ'} = ["*TEPS"];
+   $extmslx{'PA'} = ["*AFT_PERF_ANALYZER_WHSE_AGENT"];
    $extmslx{'PH'} = ["*HMC_BASE"];
-   $extmslx{'YN'} = ["*ITCAM_WEBSPHERE_AGENT","*CAM_WAS_SERVER","*CAM_WAS_PORTAL_SERVER"];
-   $extmslx{'HD'} = ["*WAREHOUSE_PROXY"];
-   $extmslx{'CF'} = ["*GENERIC_CONFIG"];
+   $extmslx{'PK'} = ["*CEC_BASE"];
+   $extmslx{'PX'} = ["*AIX_PREMIUM"];
+   $extmslx{'Q5'} = ["*MS_CLUSTER"];
+   $extmslx{'QX'} = ["*CITRIX_PRES_SVR"];
    $extmslx{'R9'} = ["*BSM_CIRA_AGENT"];
-
+   $extmslx{'SY'} = ["*AGGREGATION_AND_PRUNING"];
+   $extmslx{'UL'} = ["*UNIX_LOG_ALERT"];
+   $extmslx{'UM'} = ["*UNIVERSAL"];
+   $extmslx{'UX'} = ["*ALL_UNIX"];
+   $extmslx{'VA'} = ["*VIOS_PREMIUM"];
+   $extmslx{'VM'} = ["*VMWARE_VI"];
+   $extmslx{'YN'} = ["*ITCAM_WEBSPHERE_AGENT","*CAM_WAS_SERVER","*CAM_WAS_PORTAL_SERVER"];
 
 
 # variables for getting product information from the node status table
@@ -401,7 +400,7 @@ $oHub->transport->add_handler( response_done => sub {
 
 if ($got_connection != 1) {
    logit(0,"Survey - no primary hub TEMS found - ending survey");
-   dumplogexit;
+   exit 1;
 }
 
 
@@ -475,8 +474,8 @@ if ($opt_noretry == 0) {
    for (my $i=0; $i<=$snodei; $i++) {
       next if $snode_agent_interested[$i] == 0;
       next if $snode_agent_responsive[$i] == 1;
-      logit(0,"working on agent[$snode[$i]] $i of $snodei");
-      my $tlen = length($opt_agent_timeout);
+      logit(0,"retry stage 1 on agent[$snode[$i]] $i of $snodei");
+      my $tlen = length($opt_retry_timeout);
       $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE  SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
       @list = DoSoap("CT_Get",$sSQL);
       # note errors but continue on
@@ -491,6 +490,7 @@ if ($opt_noretry == 0) {
                $in_node =~ s/\s+$//;   #trim trailing whitespace
                $snode_agent_responsive[$i] = 1;
                $snode_agent_retry[$i] = 1;
+               $snode_agent_retry_timeout[$i] = $opt_retry_timeout;
                $snode_agent_oplog1[$i] = $in_id if $in_id ne "KRALOG000";
             }
          }
@@ -498,6 +498,44 @@ if ($opt_noretry == 0) {
    }
 }
 
+# second stage retry
+if ($opt_noretry == 0) {
+   for (my $i=0; $i<=$snodei; $i++) {
+      next if $snode_agent_interested[$i] == 0;
+      next if $snode_agent_responsive[$i] == 1;
+      logit(0,"retry stage 2 on agent[$snode[$i]] $i of $snodei");
+      my $tlen = length($opt_retry_timeout2);
+      $sSQL = "SELECT ID,DATETIME,ORIGINNODE FROM O4SRV.OPLOG AT('$snode_tems_thrunode[$i]') WHERE  SYSTEM.PARMA('TIMEOUT','$opt_retry_timeout2',$tlen) AND ORIGINNODE = '$snode[$i]' AND FIRST(1);";
+      @list = DoSoap("CT_Get",$sSQL);
+      # note errors but continue on
+      if ($run_status == 0) {
+         if ($#list == 0) {
+            foreach my $r (@list) {
+               my $in_id = $r->{ID};
+               $in_id =~ s/\s+$//;   #trim trailing whitespace
+               $in_datetime = $r->{DATETIME};
+               $in_datetime =~ s/\s+$//;   #trim trailing whitespace
+               $in_node = $r->{System_Name};
+               $in_node =~ s/\s+$//;   #trim trailing whitespace
+               $snode_agent_responsive[$i] = 1;
+               $snode_agent_retry[$i] = 1;
+               $snode_agent_retry_timeout[$i] = $opt_retry_timeout2;
+               $snode_agent_oplog1[$i] = $in_id if $in_id ne "KRALOG000";
+            }
+         }
+      }
+   }
+}
+
+my $vertemsi = -1;
+my @vertems  = ();
+my %vertemsx = ();
+my @vertems_zombie_ct = ();
+
+my $vertemai = -1;
+my @vertema  = ();
+my %vertemax = ();
+my @vertema_zombie_ct = ();
 
 my $total_uninterested = 0;
 my $total_nonresponsive = 0;
@@ -507,8 +545,11 @@ my $total_oplog1 = 0;
 my $rlinei = -1;
 my @rline = ();
 my $outline;
+my $p_ver;
 
 # now produce report
+$rlinei++;$rline[$rlinei]="Possible Zombie Agents\n";
+$rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,Agent_Arch,TEMA_version,Hostaddr\n";
 for (my $i=0; $i<=$snodei; $i++) {
    if ($snode_agent_interested[$i] == 0) {
       $total_uninterested += 1;
@@ -516,47 +557,133 @@ for (my $i=0; $i<=$snodei; $i++) {
       $total_nonresponsive += 1;
       $outline = "$snode[$i],";
       $outline .= "$snode_tems_thrunode[$i],";
+#if (!defined $snode_tems_version[$i]) {
+#$DB::single=2;
+#}
       $outline .= "$snode_tems_version[$i],";
+
       $outline .= "$snode_tems_product[$i],";
       $outline .= "$snode_agent_version[$i],";
+      $outline .= "$snode_agent_arch[$i],";
       @words = split(";",$snode_agent_common[$i]);
       @words = split(":",$words[1]);
-      my $p_ver = substr($words[0],2,8);
+      $p_ver = substr($words[0],2,8);
       $outline .= "$p_ver,";
       $outline .= "$snode_tems_hostaddr[$i],";
       $rlinei++;$rline[$rlinei]="$outline\n";
+
+      # count by TEMS version
+      $key = $snode_tems_version[$i];
+      $px = $vertemsx{$key};
+      if (!defined $px) {
+         $vertemsi++;
+         $px = $vertemsi;
+         $vertems[$px] = $snode_tems_version[$i];
+         $vertemsx{$key} = $px;
+         $vertems_zombie_ct[$px] = 0;
+      }
+      $vertems_zombie_ct[$px] += 1;
+
+      # count by TEMA version
+      $key = $p_ver;
+      $px = $vertemax{$key};
+      if (!defined $px) {
+         $vertemai++;
+         $px = $vertemai;
+         $vertema[$px] = $p_ver;
+         $vertemax{$key} = $px;
+         $vertema_zombie_ct[$px] = 0;
+      }
+      $vertema_zombie_ct[$px] += 1;
+
+      # count by TEMS nodeid
+      $key = $snode_tems_thrunode[$i];
+      $px = $temsx{$key};
+      $tems_zombie_ct[$px] += 1 if defined $px;
+
+      # count by Product
+      $key = $snode_tems_product[$i];
+      $px = $xprodx{$key};
+      $xprod_zombie_ct[$px] += 1 if defined $px;
    } else {
       $total_responsive += 1;
       $total_retries += 1 if $snode_agent_retry[$i] == 1;
    }
 }
 
+if ($total_nonresponsive > 0) {
+
+   # report on zombie agents
+   $rlinei++;$rline[$rlinei]="\n";
+   $rlinei++;$rline[$rlinei]="TEMS,Zombie Count\n";
+   foreach my $f ( sort { $tems_zombie_ct[$temsx{$b}] cmp $tems_zombie_ct[$temsx{$a}] } keys %temsx ) {
+      $px = $temsx{$f};
+      $outline = "$tems[$px],";
+      $outline .= "$tems_zombie_ct[$px],";
+      $rlinei++;$rline[$rlinei]="$outline\n";
+   }
+
+   # summarize by product
+   $rlinei++;$rline[$rlinei]="\n";
+   $rlinei++;$rline[$rlinei]="Product,Zombie Count\n";
+   foreach my $f ( sort { $xprod_zombie_ct[$xprodx{$b}] cmp $xprod_zombie_ct[$xprodx{$a}] } keys %xprodx ) {
+      $px = $xprodx{$f};
+      next if !defined $px;
+      $outline = "$xprod[$px],";
+      $outline .= "$xprod_zombie_ct[$px],";
+      $rlinei++;$rline[$rlinei]="$outline\n";
+   }
+
+   # summarize by TEMS version
+   $rlinei++;$rline[$rlinei]="\n";
+   $rlinei++;$rline[$rlinei]="TEMS Version,Zombie Count\n";
+   foreach my $f ( sort { $vertems_zombie_ct[$vertemsx{$b}] cmp $vertems_zombie_ct[$vertemsx{$a}] } keys %vertemsx) {
+      $px = $vertemsx{$f};
+      $outline = "$vertems[$px],";
+      $outline .= "$vertems_zombie_ct[$px],";
+      $rlinei++;$rline[$rlinei]="$outline\n";
+   }
+
+   # summarize by TEMA version
+   $rlinei++;$rline[$rlinei]="\n";
+   $rlinei++;$rline[$rlinei]="TEMA Version,Zombie Count\n";
+   foreach my $f ( sort { $vertema_zombie_ct[$vertemax{$b}] cmp $vertema_zombie_ct[$vertemax{$a}] } keys %vertemax) {
+      $px = $vertemax{$f};
+      $outline = "$vertema[$px],";
+      $outline .= "$vertema_zombie_ct[$px],";
+      $rlinei++;$rline[$rlinei]="$outline\n";
+   }
+}
+
 if ($total_retries > 0) {
    $rlinei++;$rline[$rlinei]="\n";
    $rlinei++;$rline[$rlinei]="Responsive agents needing retries\n";
-   $rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Hostaddr\n";
+   $rlinei++;$rline[$rlinei]="Node,Thrunode,Retry_time,TEMS_version,Product,Agent_Version,Agent_Arch,TEMA_version,Hostaddr\n";
    for (my $i=0; $i<=$snodei; $i++) {
       next if $snode_agent_responsive[$i] == 0;
       next if $snode_agent_retry[$i] == 0;
       $outline = "$snode[$i],";
       $outline .= "$snode_tems_thrunode[$i],";
+      $outline .= "$snode_agent_retry_timeout[$i],";
       $outline .= "$snode_tems_version[$i],";
       $outline .= "$snode_tems_product[$i],";
       $outline .= "$snode_agent_version[$i],";
+      $outline .= "$snode_agent_arch[$i],";
       @words = split(";",$snode_agent_common[$i]);
       @words = split(":",$words[1]);
       my $p_ver = substr($words[0],2,8);
       $outline .= "$p_ver,";
-      $total_oplog1 += 1;
+      $total_oplog1 += 1 if $snode_agent_oplog1[$i] ne "KRALOG000";
       $outline .= "$snode_tems_hostaddr[$i],";
       $rlinei++;$rline[$rlinei]="$outline\n";
    }
+
 }
 
 if ($total_oplog1 > 0) {
    $rlinei++;$rline[$rlinei]="\n";
    $rlinei++;$rline[$rlinei]="Responsive agents with invalid oplog first line\n";
-   $rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Oplog1,Hostaddr\n";
+   $rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,Agent_Arch,TEMA_version,Oplog1,Hostaddr\n";
    for (my $i=0; $i<=$snodei; $i++) {
       next if $snode_agent_responsive[$i] == 0;
       next if $snode_agent_retry[$i] == 0;
@@ -566,12 +693,12 @@ if ($total_oplog1 > 0) {
       $outline .= "$snode_tems_version[$i],";
       $outline .= "$snode_tems_product[$i],";
       $outline .= "$snode_agent_version[$i],";
+      $outline .= "$snode_agent_arch[$i],";
       @words = split(";",$snode_agent_common[$i]);
       @words = split(":",$words[1]);
       my $p_ver = substr($words[0],2,8);
       $outline .= "$p_ver,";
       $outline .= "$snode_agent_oplog1[$i],";
-      $total_oplog1 += 1;
       $outline .= "$snode_tems_hostaddr[$i],";
       $rlinei++;$rline[$rlinei]="$outline\n";
    }
@@ -582,6 +709,7 @@ my $zombie_dur = time - $zombie_start;
 
 open OH, ">$opt_o" or die "can't open '$opt_o': $!";
 print OH "Zombie Agent Report $gVersion - duration $zombie_dur seconds\n";
+print OH "Start: $zombie_start_time hub TEMS: $tems_hub_nodeid\n";
 print OH "Arguments $args_start\n";
 print OH "\n";
 my $psnodei = $snodei+1;
@@ -591,8 +719,6 @@ print OH "Total Responsive agents needing retry,$total_retries,\n";
 print OH "Total Zombie agents,$total_nonresponsive,\n";
 print OH "Total Invalid Oplog agents,$total_oplog1,\n";
 print OH "\n";
-print OH "Possible Zombie Agents\n";
-print OH "Node,Thrunode,TEMS_version,Product,Agent_Version,TEMA_version,Hostaddr\n";
 
 for (my $i=0; $i<=$rlinei; $i++) {
    print OH $rline[$i];
@@ -623,7 +749,8 @@ sub init {
               'v' => \  $opt_v,                       # verbose - print immediately as well as log
               'vt' => \  $opt_vt,                     # verbose traffic - print traffic.txt
               'noretry' => \  $opt_noretry,             # retry failures one by one
-              'retry_timeout=i' => \ $opt_retry_timeout, # retry failures one by one
+              'retry_timeout=i' => \ $opt_retry_timeout, # retry failures one by one stage 1
+              'retry_timeout2=i' => \ $opt_retry_timeout2, # retry failures one by one stage 2
               'o=s' => \ $opt_o,                      # output file
               'pc=s' => \  @opt_pc,                   # Product Code
               'tems=s' => \  @opt_tems,               # TEMS names
@@ -676,7 +803,7 @@ sub init {
          elsif ($words[0] eq "noretry") {$opt_noretry = 1;}
          elsif ($words[0] eq "passwd") {}                      # null password
          else {
-            logit(0,"SURVEY003E Control without needed parameters $words[0] - $opt_ini [$l]");
+            print STDERR "SURVEY003E Control without needed parameters $words[0] - $opt_ini [$l]\n";
             $run_status++;
          }
          next;
@@ -692,10 +819,11 @@ sub init {
       elsif ($words[0] eq "tems") {push(@opt_tems,$words[1]);}
       elsif ($words[0] eq "agent_timeout") {$opt_agent_timeout = $words[1];}
       elsif ($words[0] eq "retry_timeout") {$opt_retry_timeout = $words[1];}
+      elsif ($words[0] eq "retry_timeout2") {$opt_retry_timeout2 = $words[1];}
       elsif ($words[0] eq "o") {$opt_o = $words[1];}
       elsif ($words[0] eq "soap_timeout") {$opt_soap_timeout = $words[1];}
       else {
-         logit(0,"SURVEY005E ini file $l - unknown control $words[0]"); # kill process after current phase
+         print STDERR "SURVEY005E ini file $l - unknown control $words[0]\n"; # kill process after current phase
          $run_status++;
       }
    }
@@ -710,8 +838,9 @@ sub init {
    if (!defined $opt_std) {$opt_std=0;}                        # default - no credentials in stdin
    if (!defined $opt_agent_timeout) {$opt_agent_timeout=50;}   # default 50 seconds
    if (!defined $opt_soap_timeout) {$opt_soap_timeout=180;}    # default 180 seconds
-   if (!defined $opt_noretry) {$opt_noretry=0;}                  # default to retry
-   if (!defined $opt_retry_timeout) {$opt_retry_timeout=15;}           # default 15 second retry
+   if (!defined $opt_noretry) {$opt_noretry=0;}                # default to retry
+   if (!defined $opt_retry_timeout) {$opt_retry_timeout=15;}   # default 15 second retry stage 1
+   if (!defined $opt_retry_timeout2) {$opt_retry_timeout2=50;}  # default 50 second retry stage 2
    if (!defined $opt_o) {$opt_o="zombie.csv";}                 # default output file
 
 
@@ -732,7 +861,7 @@ sub init {
       my $module = "Data::Dumper";
       eval {load $module};
       if ($@) {
-         logit(1,"Cannot load Data::Dumper - ignoring -dpr option");
+         print STDERR "Cannot load Data::Dumper - ignoring -dpr option\n";
          $opt_dpr = 0;
       }
    }
@@ -763,26 +892,23 @@ sub init {
    # complain about options which must be present
 
    if ($#connections == -1) {
-      logit(0,"SURVEY006E connection missing in ini file $opt_ini");
+      print STDERR "SURVEY006E connection missing in ini file $opt_ini\n";
       $run_status++;
    }
    if ($user eq "") {
-      logit(0,"SURVEY007E user missing in ini file $opt_ini or stdin");
+      print STDERR "SURVEY007E user missing in ini file $opt_ini or stdin\n";
       $run_status++;
    }
 
    # if any errors, then dump log and exit
    # this way we can show multiple errors at startup
-   if ($run_status) { dumplogexit;}
+   if ($run_status) { exit 1;}
 
 }
 
 sub tems_node_analysis
 {
-   $survey_tems++;
-
    # local variables
-   my $node_filebase;
 
 
    # reset all variables used by the tems static analysis
@@ -800,25 +926,18 @@ sub tems_node_analysis
    $snodei = -1;
    @snode = ();
    %snodex = ();
-   %snode_filex = ();
-   @snode_survey_online = ();                  # used to track offline conditions
-   @snode_survey_sits = ();
-   @snode_persist_sits = ();
-   @snode_survey_sits_noauto = ();
    @snode_tems_product = ();
    @snode_tems_thrunode = ();
    @snode_tems_version = ();
    @snode_tems_hostaddr = ();
+   @snode_tems_zombie_ct = ();
    @snode_agent_version = ();                  # version  information, include ip address
+   @snode_agent_arch = ();                     # architecture
    @snode_agent_common  = ();                  # common software levels
-   @snode_survey_maxdelay = ();
-   @snode_survey_maxdelay_situation = ();
-   @snode_survey_connects = ();
-   @snode_survey_sitct = ();
-   @snode_survey_actions = ();
    @snode_agent_responsive = ();               # when 1, node was responsive
    @snode_agent_interested = ();               # when 1, node is being checked
    @snode_agent_retry      = ();               # when 1, retry used
+   @snode_agent_retry_timeout = ();            # retry timeout needed
    @snode_agent_oplog1     = ();               # when non-null, invalid first oplog record
 
    $temsi = -1;
@@ -830,6 +949,7 @@ sub tems_node_analysis
    @tems_cpubusy = ();                         # current process cpubusy
    @tems_server_busy = ();                     # current server cpubusy
    @tems_hostaddr = ();                        # current TEMS host address
+   @tems_zombie_ct = ();                        # current TEMS host address
    @tems_time = ();
    @tems_time_epoch = ();
    @tems_time_capture = ();
@@ -858,6 +978,7 @@ sub tems_node_analysis
    foreach my $r (@list) {
        $node = $r->{NODE};
        $node =~ s/\s+$//;   #trim trailing whitespace
+#$DB::single=2;
        $temsi++;
        $tx = $temsi;
        $tems[$tx] = $node;
@@ -877,6 +998,7 @@ sub tems_node_analysis
        $hostaddr =~ s/\s+$//;   #trim trailing whitespace
        $tems_hub_nodeid = $node if $node eq $thrunode;
        $tems_hostaddr[$tx] = $hostaddr;
+       $tems_zombie_ct[$tx] = 0;
        $tems_time[$tx] = 0;
        $tems_time_capture[$tx] = 0;
        $tems_vmsize[$tx] = 0;
@@ -919,7 +1041,6 @@ sub tems_node_analysis
    # get node status for online managed systems
    my $samp_nodes = "";    #prepare for nodelist capture
 
-#  $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM' AND FIRST(175)";  # debug
    $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
@@ -947,29 +1068,29 @@ sub tems_node_analysis
        $agent_common =~ s/\s+$//;   #trim trailing whitespace
        $ptx = $temsx{$thrunode};    #ignore any agents not connected through TEMSes
        next if !defined $ptx;       # the subnode agents
-
        $snodei++;
        $snx = $snodei;
        $snode[$snx] = $node;
        $snodex{$node} = $snx;
-       $node_filebase = $node;
-       $node_filebase =~ s/:/_/g;
-       $snode_filex{$node_filebase} = $snx;
-       $snode_survey_online[$snx] = 1;                    # node online when we checked the TEMS tables
-       $snode_survey_sits[$snx] = " ";
-       $snode_persist_sits[$snx] = " ";
-       $snode_survey_sits_noauto[$snx] = " ";
        $snode_tems_product[$snx] = $product;
        $snode_tems_hostaddr[$snx] = $hostaddr;
        $snode_tems_thrunode[$snx] = $thrunode;
        $snode_agent_version[$snx] = $agent_version;
+       @words = split(";",$agent_common);
+       @words = split(":",$words[0]);
+       $snode_agent_arch[$snx] = $words[1];
        $snode_tems_version[$snx] = "";
        $ptx = $temsx{$thrunode};
+#if (!defined $ptx) {
+#$DB::single=2;
+#}
        $snode_tems_version[$snx] = $tems_version[$ptx] if defined $ptx;
        $snode_agent_common[$snx] = $agent_common;
+
        $snode_agent_responsive[$snx] = 0;           # non-responsive until tested
        $snode_agent_interested[$snx] = 1;           # interested unless product values set
        $snode_agent_retry[$snx]      = 0;           # When 1, retry performed
+       $snode_agent_retry_timeout[$snx]      = 0;   # retry timeout needed
        $snode_agent_oplog1[$snx]     = "";          # invalid first oplog entry
        if ($#opt_pc != -1) {                        # if product codes set, only interested in those
           $ptx = $opt_pcx{$product};
@@ -1004,6 +1125,7 @@ sub tems_node_analysis
                 $samp_nodes .= " OR NODE='$node'";
              }
           }
+          $xprod_zombie_ct[$ptx] = 0;
        }
 
        # keep track of the number of products of each type at each TEMS
@@ -1016,10 +1138,12 @@ sub tems_node_analysis
           $pxprod[$ptx] = $key;
           $pxprodx{$key} = $ptx;
           $pxprod_count[$ptx] = 0;
+          $pxprod_zombie_ct[$ptx] = 0;
        }
        $pxprod_count[$ptx] += 1;
        logit(100,"Node $snodei $node product[$snode_tems_product[$snx]] thrunode[[$snode_tems_thrunode[$snx]] hostaddr[[$snode_tems_hostaddr[$snx]]  agent_version[$snode_agent_version[$snx]]  agent_common[$snode_agent_common[$snx]]");
    }
+
    if ($samp_nodes ne "") {
       # Get TNODELST data to figure out what the system generated MSL name is for each product
       $sSQL = "SELECT NODE, NODELIST, NODETYPE FROM O4SRV.TNODELST WHERE $samp_nodes AND NODETYPE='M'";
@@ -1044,10 +1168,11 @@ sub tems_node_analysis
              @xprod_msls = ();
              push(@xprod_msls,$nodelist);
              $xprod_msl[$ptx] = \@xprod_msls;
+             my $in_prod = $xprod[$ptx];
+             logit(10,"Added product[$in_prod] using nodelist[$nodelist]");
           }
       }
    }
-
 }
 
 
@@ -1148,7 +1273,7 @@ sub DoSoap
 
    } else {
       logit(0,"Unknown SOAP message [$soap_action]");
-      dumplogexit;
+      exit 1;
   }
 
 if ($soap_rc != 0) {
@@ -1280,7 +1405,8 @@ sub GiveHelp
     agent        : <none> single agent survey and then stop
     agent_timeout : seconds to wait for an agent response, default 50 seconds
     noretry       : after a stage I failure, skip the retry on individual agents, default off
-    retry_timeout : Agent timeout during retry - default 15 seconds
+    retry_timeout : Agent timeout during retry/1 - default 15 seconds
+    retry_timeout2: Agent timeout during retry/2 - default 50 seconds
 
   Example invovation
     $0  -ini <control file> -pc ux
@@ -1318,13 +1444,6 @@ sub logit
 # capture agent log record
 #------------------------------------------------------------------------------
 # capture agent error record
-sub dumplogexit
-{
-   logit(0,"SURVEY999E - total runtime errors = $run_status");
-   close FH;
-   exit 1;
-}
-
 
 # write output log
 sub datadumperlog
@@ -1732,3 +1851,7 @@ $run_status++;
 # 0.75000  : pre-define many nodelists
 #            fixup add_handler function
 #            handle multiple nodelists for a single product
+# 0.80000  : Added 4 summary reports
+#          : handle early errors better
+#          : add double retry at 15 and then 50 seconds and record
+#          : handle oplog1 report better
