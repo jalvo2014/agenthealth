@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "1.06000";
+my $gVersion = "1.07000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -133,7 +133,8 @@ my $opt_workpath;               # Directory to store output files
 my $opt_um;                     # write universal message for each potential unhealthy agent
 my @opt_um_parms;               # write universal message, parms
 my $opt_um_sev = 5;             # universal message severity, default 5
-my $opt_um_cat = "KO4ALM90";     # universal message id, default KO4ALM90
+my $opt_um_cat = "KO4ALM90";    # universal message id, default KO4ALM90
+my $opt_cmd = "";               # command to run when possible unhealth agent found
 
 my $msg_agent = "";
 my $msg_thrunode = "";
@@ -679,6 +680,39 @@ if ($opt_um == 1) {
    }
 }
 
+if ($opt_cmd ne "") {
+   if ($total_nonresponsive > 0) {
+      for (my $i=0; $i<=$snodei; $i++) {
+         next if $snode_agent_interested[$i] == 0;
+         next if $snode_agent_responsive[$i] == 1;
+         $msg_agent = $snode[$i];
+         $msg_thrunode = $snode_tems_thrunode[$i];
+         $msg_hostaddr = $snode_tems_hostaddr[$i];
+         $msg_hostinfo = $snode_tems_hostinfo[$i];
+         $msg_product = $snode_tems_product[$i];
+         $msg_version = $snode_tems_version[$i];
+         my $cmd = $opt_cmd;
+         $cmd =~ s/\\/\\\\/g;
+         $cmd =~ s/\>/\\\>/g;
+         $cmd =~ s/\</\\\</g;
+         my $run_cmd = eval "\"" . $cmd. "\"";
+         logit(0,"Command text $run_cmd");
+         if ($@) {
+            $DB::single=2 if $opt_debug == 1;
+            logit(1,"Command evaluation failure - [$@]");
+         } else {
+            $rc = system($run_cmd);
+            if ($rc != 0) {
+               $DB::single=2 if $opt_debug == 1;
+               logit(1,"Command start failure - $rc)");
+            } else {
+               logit(0,"Command start success");
+            }
+         }
+      }
+   }
+}
+
 if ($total_nonresponsive > 0) {
    # report on unheathy agents
    $rlinei++;$rline[$rlinei]="\n";
@@ -966,6 +1000,9 @@ sub init {
                splice(@words,0,3);
                $opt_um_msg = join(" ",@words);
             }
+         } elsif ($words[0] eq "cmd") {
+            splice(@words,0,1);
+            $opt_cmd = join(" ",@words);
          }
 
          else {
@@ -995,6 +1032,7 @@ sub init {
    if (!defined $opt_workpath) {$opt_workpath="";}             # default is current directory
    if (!defined $opt_agent_list) {$opt_agent_list="";}         # default to no agent file
    if (!defined $opt_ignore_list) {$opt_ignore_list="";}       # default to no ignore agent list
+   if (!defined $opt_um) {$opt_um = 0;}                        # default to no universal message
 
    $opt_workpath =~ s/\\/\//g;                                 # convert to standard perl forward slashes
    if ($opt_workpath ne "") {
@@ -2095,3 +2133,4 @@ $run_status++;
 # 1.04000  : add -ignore_list option
 # 1.05000  : add -um to send univeral message on unhealthy agents
 # 1.06000  : let um message be settable by the user from ini file
+# 1.07000  : Add cmd option to ini file
