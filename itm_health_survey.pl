@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "1.01000";
+my $gVersion = "1.02000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -138,7 +138,6 @@ my $connection="";                  # one particular connection
 
 
 $rc = init($args_start);
-
 
 if ($opt_vt == 1) {
    my $traffic_file = $opt_workpath . "traffic.txt";
@@ -469,7 +468,7 @@ for (my $t=0; $t<=$temsi; $t++) {
                   $sx = $snodex{$in_node};
                   next if !defined $sx;
                   next if $snode_agent_interested[$sx] == 0;
-                  $snode_agent_responsive[$sx] = 1
+                  $snode_agent_responsive[$sx] = 1 if $in_id ne "";
                } # next entries
             } # some entries
          } # bad soap return
@@ -499,7 +498,7 @@ if ($opt_noretry == 0) {
                $snode_agent_responsive[$i] = 1;
                $snode_agent_retry[$i] = 1;
                $snode_agent_retry_timeout[$i] = $opt_retry_timeout;
-               $snode_agent_oplog1[$i] = $in_id if $in_id ne "KRALOG000";
+               $snode_agent_oplog1[$i] = $in_id;
             }
          }
       }
@@ -528,7 +527,7 @@ if ($opt_noretry == 0) {
                $snode_agent_responsive[$i] = 1;
                $snode_agent_retry[$i] = 1;
                $snode_agent_retry_timeout[$i] = $opt_retry_timeout2;
-               $snode_agent_oplog1[$i] = $in_id if $in_id ne "KRALOG000";
+               $snode_agent_oplog1[$i] = $in_id;
             }
          }
       }
@@ -621,7 +620,6 @@ for (my $i=0; $i<=$snodei; $i++) {
 }
 
 if ($total_nonresponsive > 0) {
-
    # report on unheathy agents
    $rlinei++;$rline[$rlinei]="\n";
    $rlinei++;$rline[$rlinei]="TEMS,UnHealthy Count\n";
@@ -1141,6 +1139,7 @@ sub tems_node_analysis
        $snode[$snx] = $node;
        $snodex{$node} = $snx;
        $snode_tems_product[$snx] = $product;
+
        $snode_tems_hostaddr[$snx] = $hostaddr;
        $snode_tems_thrunode[$snx] = $thrunode;
        $snode_agent_version[$snx] = $agent_version;
@@ -1169,8 +1168,10 @@ sub tems_node_analysis
           $ptx = $opt_temsx{$thrunode};
           $snode_agent_interested[$snx] = 0 if !defined $ptx;
        }
-       $ax = $agentx{$node};
-       $snode_agent_interested[$snx] = 0 if !defined $ax;
+       if (%agentx) {
+          $ax = $agentx{$node};
+          $snode_agent_interested[$snx] = 0 if !defined $ax;
+       }
        $ptx = $temsx{$thrunode};
        $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] eq "";
        $total_interested += 1 if $snode_agent_interested[$snx] == 1;
@@ -1901,3 +1902,4 @@ $run_status++;
 # 1.00000  : Suppress display of -user and -password values
 # 1.01000  : Handle traffic.txt when workpath specified
 #          : Add -agent and -agent_list and agent and agent_list
+# 1.02000  : handle non -agent/-agent_list cases
