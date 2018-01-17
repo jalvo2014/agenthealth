@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "1.00000";
+my $gVersion = "1.01000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -85,6 +85,8 @@ my $pcount;
 my $px;
 my $t;
 my $total_interested = 0;
+my %agentx = ();                               # hash index to agents of interest
+my $ax;
 
 # forward declarations of subroutines
 
@@ -114,6 +116,8 @@ my @opt_pc = ();                # Product codes - like ux for Unix OS Agent
 my %opt_pcx = ();               # index to Product codes
 my @opt_tems = ();              # TEMS names to survey
 my %opt_temsx = ();             # index to TEMS names
+my $opt_agent_list;             # agent names;
+my @opt_agent = ();             # specific agent names
 my $opt_dpr;                    # dump data structure flag
 my $opt_std;                    # Credentials from standard input
 my $opt_agent_timeout;          # How long to wait for agents
@@ -138,12 +142,12 @@ $rc = init($args_start);
 
 if ($opt_vt == 1) {
    my $traffic_file = $opt_workpath . "traffic.txt";
-   open $debugfile, '>$traffic_file' or die "can't open '$traffic_file': $!";;
+   open $debugfile, ">$traffic_file" or die "can't open $traffic_file: $!";
    $debugfile->autoflush(1);
 }
 
 $opt_log = $opt_workpath . $opt_log;
-open FH, ">>$opt_log" or die "can't open '$opt_log': $!";
+open FH, ">>$opt_log" or die "can't open $opt_log: $!";
 
 logit(0,"SURVEY000I - ITM_Health_Survey $gVersion $args_start");
 
@@ -215,8 +219,9 @@ my @tems_hostaddr = ();                        # current server host address
 my @tems_health_ct = ();                       # number of unhealthy agents
 my $tems_hub_nodeid = "";                      # nodeid of hub;
 
+
 # pre-stored product code to system generated Managed System List names
-# add more later
+# add more later when discovered
 my %extmslx = ();
    $extmslx{'CF'} = ["*GENERIC_CONFIG"];
    $extmslx{'CQ'} = ["*TEPS"];
@@ -243,7 +248,17 @@ my %extmslx = ();
    $extmslx{'VA'} = ["*VIOS_PREMIUM"];
    $extmslx{'VM'} = ["*VMWARE_VI"];
    $extmslx{'YN'} = ["*ITCAM_WEBSPHERE_AGENT","*CAM_WAS_SERVER","*CAM_WAS_PORTAL_SERVER"];
-
+   $extmslx{'OB'} = ["*CMS"];
+   $extmslx{'CP'} = ["*CPIRA_MGR"];
+   $extmslx{'T3'} = ["*EM_DB"];
+   $extmslx{'CE'} = ["*IBM_CICSplexes"];
+   $extmslx{'TO'} = ["*IBM_ITCAMfT_KTO"];
+   $extmslx{'TU'} = ["*IBM_KTU"];
+   $extmslx{'HT'} = ["*ITCAM_WEB_SERVER_AGENT"];
+   $extmslx{'NP'} = ["*MANAGER_IP_AGENT"];
+   $extmslx{'IP'} = ["*MVS_IMSPLEX"];
+   $extmslx{'M5'} = ["*MVS_SYSTEM"];
+   $extmslx{'N3'} = ["*OMEGAMONXE_MAINFRAME_NTWK"];
 
 # variables for getting product information from the node status table
 
@@ -712,7 +727,7 @@ my $health_dur = time - $health_start;
 
 my $o_file = $opt_workpath . $opt_o;
 
-open OH, ">$o_file" or die "can't open '$o_file': $!";
+open OH, ">$o_file" or die "can't open $o_file: $!";
 print OH "Agent Health Report $gVersion - duration $health_dur seconds\n";
 print OH "Start: $health_start_time hub TEMS: $tems_hub_nodeid\n";
 
@@ -787,7 +802,9 @@ sub init {
               'pc=s' => \  @opt_pc,                   # Product Code
               'tems=s' => \  @opt_tems,               # TEMS names
               'dpr' => \ $opt_dpr,                    # dump data structures
-              'std' => \ $opt_std                    # credentials from standard input
+              'agent_list=s' => \ $opt_agent_list,    # file with agents of interest
+              'agent=s' => \  @opt_agent,             # agents of interest
+              'std' => \ $opt_std                     # credentials from standard input
              );
    # if other things found on the command line - complain and quit
    @myargs_remain_array = @$myargs_remain;
@@ -849,6 +866,8 @@ sub init {
       elsif ($words[0] eq "log") {$opt_log = $words[1];}
       elsif ($words[0] eq "pc") {push(@opt_pc,$words[1]);}
       elsif ($words[0] eq "tems") {push(@opt_tems,$words[1]);}
+      elsif ($words[0] eq "agent") {push(@opt_agent,$words[1]);}
+      elsif ($words[0] eq "agent_list") {$opt_agent_list = $words[1];}
       elsif ($words[0] eq "agent_timeout") {$opt_agent_timeout = $words[1];}
       elsif ($words[0] eq "retry_timeout") {$opt_retry_timeout = $words[1];}
       elsif ($words[0] eq "retry_timeout2") {$opt_retry_timeout2 = $words[1];}
@@ -876,6 +895,7 @@ sub init {
    if (!defined $opt_retry_timeout2) {$opt_retry_timeout2=50;}  # default 50 second retry stage 2
    if (!defined $opt_o) {$opt_o="health.csv";}                 # default output file
    if (!defined $opt_workpath) {$opt_workpath="";}             # default is current directory
+   if (!defined $opt_agent_list) {$opt_agent_list="";}         # default to no agent file
 
    $opt_workpath =~ s/\\/\//g;                                 # convert to standard perl forward slashes
    if ($opt_workpath ne "") {
@@ -894,6 +914,19 @@ sub init {
    }
 
    foreach my $t (@opt_pc) {$opt_pcx{$t} = 1;}
+
+   foreach my $t (@opt_agent) {$agentx{$t} = 1;}  # specified agents
+   if ($opt_agent_list ne "") {
+      open( FILE, "< $opt_agent_list" ) or die "Cannot open agent_list $opt_agent_list : $!";
+      my @ips = <FILE>;
+      close FILE;
+      foreach my $oneline (@ips) {
+         chomp($oneline);
+         $oneline =~ s/\s+$//;   #trim trailing whitespace
+         $agentx{$oneline} = 1;
+      }
+   }
+
 
    if ($opt_dpr == 1) {
 #     my $module = "Data::Dumper";
@@ -1136,7 +1169,8 @@ sub tems_node_analysis
           $ptx = $opt_temsx{$thrunode};
           $snode_agent_interested[$snx] = 0 if !defined $ptx;
        }
-
+       $ax = $agentx{$node};
+       $snode_agent_interested[$snx] = 0 if !defined $ax;
        $ptx = $temsx{$thrunode};
        $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] eq "";
        $total_interested += 1 if $snode_agent_interested[$snx] == 1;
@@ -1434,20 +1468,21 @@ sub GiveHelp
   online but possible not responsive.
 
   Default values:
-    log          : health.log
-    ini          : health.ini
-    user         : <none>
-    passwd       : <none>
-    debuglevel   : 90 [considerable number of messages]
-    debug        : 0  when 1 some breakpoints are enabled]
-    h            : 0  display help information
-    v            : 0  display log messages on console
-    vt           : 0  record http traffic on traffic.txt file
-    pc           : product code of agents - can supply multiple codes
-    tems         : tems the agents report to - can supply multiple code
-    dpr          : 0  dump data structure if Dump::Data installed
-    std          : 0  get user/password from stardard input
-    agent        : <none> single agent survey and then stop
+    log           : health.log
+    ini           : health.ini
+    user          : <none>
+    passwd        : <none>
+    debuglevel    : 90 [considerable number of messages]
+    debug         : 0  when 1 some breakpoints are enabled]
+    h             : 0  display help information
+    v             : 0  display log messages on console
+    vt            : 0  record http traffic on traffic.txt file
+    pc            : product code of agents - can supply multiple codes
+    tems          : tems the agents report to - can supply multiple code
+    dpr           : 0  dump data structure if Dump::Data installed
+    std           : 0  get user/password from stardard input
+    agent         : single agent survey - can have multiple
+    agent_list    : file with list of agent names
     agent_timeout : seconds to wait for an agent response, default 50 seconds
     noretry       : after a stage I failure, skip the retry on individual agents, default off
     retry_timeout : Agent timeout during retry/1 - default 15 seconds
@@ -1864,3 +1899,5 @@ $run_status++;
 # 0.98000  : handle a divide by zero case
 # 0.99000  : make exit code 1 when possible unhealthy agents are found
 # 1.00000  : Suppress display of -user and -password values
+# 1.01000  : Handle traffic.txt when workpath specified
+#          : Add -agent and -agent_list and agent and agent_list
