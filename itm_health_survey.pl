@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.96000";
+my $gVersion = "0.97000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -84,6 +84,7 @@ my $ll;
 my $pcount;
 my $px;
 my $t;
+my $total_interested = 0;
 
 # forward declarations of subroutines
 
@@ -121,6 +122,7 @@ my $opt_noretry;                # when 1 do not retry problem agents
 my $opt_retry_timeout;          # delay time during retry/1, default 15
 my $opt_retry_timeout2;         # delay time during retry/2, default 50
 my $opt_o;                      # output file
+my $opt_workpath;               # Directory to store output files
 
 my $user="";
 my $passwd="";
@@ -133,11 +135,14 @@ my $connection="";                  # one particular connection
 
 $rc = init($args_start);
 
+
 if ($opt_vt == 1) {
-   open $debugfile, '>traffic.txt' or die "can't open 'traffic.txt': $!";;
+   my $traffic_file = $opt_workpath . "traffic.txt";
+   open $debugfile, '>$traffic_file' or die "can't open '$traffic_file': $!";;
    $debugfile->autoflush(1);
 }
 
+$opt_log = $opt_workpath . $opt_log;
 open FH, ">>$opt_log" or die "can't open '$opt_log': $!";
 
 logit(0,"SURVEY000I - ITM_Health_Survey $gVersion $args_start");
@@ -399,7 +404,7 @@ my $in_node;
 
 for (my $t=0; $t<=$temsi; $t++) {
    my $at_tems = $tems[$t];
-   if ($#tems != -1) {
+   if ($#opt_tems != -1) {
       $ptx = $opt_temsx{$at_tems};
       next if !defined $ptx;
    }
@@ -545,17 +550,18 @@ for (my $i=0; $i<=$snodei; $i++) {
       $total_nonresponsive += 1;
       $outline = "$snode[$i],";
       $outline .= "$snode_tems_thrunode[$i],";
-#if (!defined $snode_tems_version[$i]) {
-#$DB::single=2;
-#}
       $outline .= "$snode_tems_version[$i],";
 
       $outline .= "$snode_tems_product[$i],";
       $outline .= "$snode_agent_version[$i],";
       $outline .= "$snode_agent_arch[$i],";
-      @words = split(";",$snode_agent_common[$i]);
-      @words = split(":",$words[1]);
-      $p_ver = substr($words[0],2,8);
+      if ($snode_agent_common[$i] eq "") {
+         $p_ver = "";
+      } else {
+         @words = split(";",$snode_agent_common[$i]);
+         @words = split(":",$words[1]);
+         $p_ver = substr($words[0],2,8);
+      }
       $outline .= "$p_ver,";
       $outline .= "$snode_tems_hostaddr[$i],";
       $rlinei++;$rline[$rlinei]="$outline\n";
@@ -657,9 +663,13 @@ if ($total_retries > 0) {
       $outline .= "$snode_tems_product[$i],";
       $outline .= "$snode_agent_version[$i],";
       $outline .= "$snode_agent_arch[$i],";
-      @words = split(";",$snode_agent_common[$i]);
-      @words = split(":",$words[1]);
-      my $p_ver = substr($words[0],2,8);
+      if ($snode_agent_common[$i] eq "") {
+         $p_ver = "";
+      } else {
+         @words = split(";",$snode_agent_common[$i]);
+         @words = split(":",$words[1]);
+         $p_ver = substr($words[0],2,8);
+      }
       $outline .= "$p_ver,";
       $total_oplog1 += 1 if $snode_agent_oplog1[$i] ne "KRALOG000";
       $outline .= "$snode_tems_hostaddr[$i],";
@@ -682,9 +692,13 @@ if ($total_oplog1 > 0) {
       $outline .= "$snode_tems_product[$i],";
       $outline .= "$snode_agent_version[$i],";
       $outline .= "$snode_agent_arch[$i],";
-      @words = split(";",$snode_agent_common[$i]);
-      @words = split(":",$words[1]);
-      my $p_ver = substr($words[0],2,8);
+      if ($snode_agent_common[$i] eq "") {
+         $p_ver = "";
+      } else {
+         @words = split(";",$snode_agent_common[$i]);
+         @words = split(":",$words[1]);
+         $p_ver = substr($words[0],2,8);
+      }
       $outline .= "$p_ver,";
       $outline .= "$snode_agent_oplog1[$i],";
       $outline .= "$snode_tems_hostaddr[$i],";
@@ -695,14 +709,24 @@ if ($total_oplog1 > 0) {
 
 my $health_dur = time - $health_start;
 
-open OH, ">$opt_o" or die "can't open '$opt_o': $!";
+
+my $o_file = $opt_workpath . $opt_o;
+
+open OH, ">$o_file" or die "can't open '$o_file': $!";
 print OH "Agent Health Report $gVersion - duration $health_dur seconds\n";
 print OH "Start: $health_start_time hub TEMS: $tems_hub_nodeid\n";
 print OH "Arguments $args_start\n";
 print OH "\n";
 my $psnodei = $snodei+1;
-print OH "Total Managed systems,$psnodei,\n";
-print OH "Total Responsive agents,$total_responsive,\n";
+print OH "Total Agents,$psnodei,\n";
+print OH "Total Managed agents of Interest,$total_interested,\n";
+my $fraction = "";
+my $pfraction = "n/a";
+if ($total_interested > 0) {
+   $fraction = ($total_responsive*100) / $total_interested;
+   $pfraction = sprintf "%.2f", $fraction;
+}
+print OH "Total Responsive agents,$total_responsive,$pfraction\n";
 print OH "Total Responsive agents needing retry,$total_retries,\n";
 print OH "Total Unhealhy Agents,$total_nonresponsive,\n";
 print OH "Total Invalid Oplog agents,$total_oplog1,\n";
@@ -740,6 +764,7 @@ sub init {
               'retry_timeout=i' => \ $opt_retry_timeout, # retry failures one by one stage 1
               'retry_timeout2=i' => \ $opt_retry_timeout2, # retry failures one by one stage 2
               'o=s' => \ $opt_o,                      # output file
+              'workpath=s' => \ $opt_workpath,        # output file
               'pc=s' => \  @opt_pc,                   # Product Code
               'tems=s' => \  @opt_tems,               # TEMS names
               'dpr' => \ $opt_dpr,                    # dump data structures
@@ -755,7 +780,7 @@ sub init {
       exit 1;
    }
 
-   # Folloowing are command line only defaults. All others can be set from the ini file
+   # Following are command line only defaults. All others can be set from the ini file
 
    if (!defined $opt_ini) {$opt_ini = "health.ini";}           # default control file if not specified
    if ($opt_h) {&GiveHelp;}  # GiveHelp and exit program
@@ -809,6 +834,7 @@ sub init {
       elsif ($words[0] eq "retry_timeout") {$opt_retry_timeout = $words[1];}
       elsif ($words[0] eq "retry_timeout2") {$opt_retry_timeout2 = $words[1];}
       elsif ($words[0] eq "o") {$opt_o = $words[1];}
+      elsif ($words[0] eq "workpath") {$opt_workpath = $words[1];}
       elsif ($words[0] eq "soap_timeout") {$opt_soap_timeout = $words[1];}
       else {
          print STDERR "SURVEY005E ini file $l - unknown control $words[0]\n"; # kill process after current phase
@@ -830,7 +856,12 @@ sub init {
    if (!defined $opt_retry_timeout) {$opt_retry_timeout=15;}   # default 15 second retry stage 1
    if (!defined $opt_retry_timeout2) {$opt_retry_timeout2=50;}  # default 50 second retry stage 2
    if (!defined $opt_o) {$opt_o="health.csv";}                 # default output file
+   if (!defined $opt_workpath) {$opt_workpath="";}             # default is current directory
 
+   $opt_workpath =~ s/\\/\//g;                                 # convert to standard perl forward slashes
+   if ($opt_workpath ne "") {
+      $opt_workpath .= "\/" if substr($opt_workpath,length($opt_workpath)-1,1) ne "\/";
+   }
 
    # collect the TEMSes information into an array
    foreach $t (@opt_tems) {$opt_temsx{$t} = 1;}
@@ -957,8 +988,11 @@ sub tems_node_analysis
 #   @list = DoSoap("CT_Get",$sSQL);
 #   if ($run_status) { exit 1;}
 
+   $ll = 0;
+   $pcount = $#list+1;
    foreach my $r (@list) {
        my $count = scalar(keys %$r);
+       $ll++;
        if ($count < 6) {
           logit(10,"working on INODESTS row $ll of $pcount has $count instead of expected 6 keys");
           next;
@@ -996,7 +1030,7 @@ sub tems_node_analysis
    # determine if any TEMSes are non-responsive
    for (my $i=0;$i<=$temsi;$i++) {
       my $at_tems = $tems[$i];
-      if ($#tems != -1) {
+      if ($#opt_tems != -1) {
          $ptx = $opt_temsx{$at_tems};
          next if !defined $ptx;
       }
@@ -1029,7 +1063,6 @@ sub tems_node_analysis
    $ll = 0;
    $pcount = $#list+1;
    foreach my $r (@list) {
-#$DB::single=2;
        $ll++;
        my $count = scalar(keys %$r);
        if ($count < 6) {
@@ -1059,9 +1092,13 @@ sub tems_node_analysis
        $snode_tems_hostaddr[$snx] = $hostaddr;
        $snode_tems_thrunode[$snx] = $thrunode;
        $snode_agent_version[$snx] = $agent_version;
-       @words = split(";",$agent_common);
-       @words = split(":",$words[0]);
-       $snode_agent_arch[$snx] = $words[1];
+       if ($agent_common eq "") {
+          $snode_agent_arch[$snx] = "";
+       } else {
+          @words = split(";",$agent_common);
+          @words = split(":",$words[0]);
+          $snode_agent_arch[$snx] = $words[1];
+       }
        $snode_tems_version[$snx] = "";
        $ptx = $temsx{$thrunode};
        $snode_tems_version[$snx] = $tems_version[$ptx] if defined $ptx;
@@ -1083,6 +1120,7 @@ sub tems_node_analysis
 
        $ptx = $temsx{$thrunode};
        $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] eq "";
+       $total_interested += 1 if $snode_agent_interested[$snx] == 1;
 
        my $want_pc = 1;
        if ($#opt_pc != -1) {
@@ -1803,3 +1841,5 @@ $run_status++;
 #          : handle oplog1 report better
 # 0.95000  : switch to Health wording
 # 0.96000  : restore selective survey
+# 0.97000  : handle null INODESTS RESERVED column
+#          : handle a divide by zero case
