@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.95000";
+my $gVersion = "0.96000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -83,6 +83,7 @@ my $debugfile;
 my $ll;
 my $pcount;
 my $px;
+my $t;
 
 # forward declarations of subroutines
 
@@ -398,6 +399,11 @@ my $in_node;
 
 for (my $t=0; $t<=$temsi; $t++) {
    my $at_tems = $tems[$t];
+   if ($#tems != -1) {
+      $ptx = $opt_temsx{$at_tems};
+      next if !defined $ptx;
+   }
+
    for (my $p=0; $p<=$xprodi; $p++) {
       my $at_product = $xprod[$p];
       my @at_nodelists = @{$xprod_msl[$p]};
@@ -827,12 +833,12 @@ sub init {
 
 
    # collect the TEMSes information into an array
-   foreach my $t (@opt_tems) {$opt_temsx{$t} = 1;}
+   foreach $t (@opt_tems) {$opt_temsx{$t} = 1;}
 
    # same thing for product codes [agent types] except upper case the values first
 
    if ($#opt_pc != -1) {
-      my $t = join(" ",@opt_pc);
+      $t = join(" ",@opt_pc);
       $t = uc $t;
       @opt_pc = split(" ",$t);
    }
@@ -989,6 +995,11 @@ sub tems_node_analysis
 
    # determine if any TEMSes are non-responsive
    for (my $i=0;$i<=$temsi;$i++) {
+      my $at_tems = $tems[$i];
+      if ($#tems != -1) {
+         $ptx = $opt_temsx{$at_tems};
+         next if !defined $ptx;
+      }
       $sSQL = "SELECT SYSTIME FROM O4SRV.UTCTIME AT(\'$tems[$i]\')";
       @list_tems = DoSoap("CT_Get",$sSQL);
       if ($run_status) {
@@ -1053,9 +1064,6 @@ sub tems_node_analysis
        $snode_agent_arch[$snx] = $words[1];
        $snode_tems_version[$snx] = "";
        $ptx = $temsx{$thrunode};
-#if (!defined $ptx) {
-#$DB::single=2;
-#}
        $snode_tems_version[$snx] = $tems_version[$ptx] if defined $ptx;
        $snode_agent_common[$snx] = $agent_common;
 
@@ -1076,28 +1084,36 @@ sub tems_node_analysis
        $ptx = $temsx{$thrunode};
        $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] eq "";
 
+       my $want_pc = 1;
+       if ($#opt_pc != -1) {
+          $ptx = $opt_pcx{$product};
+          $want_pc = 0 if !defined $ptx;
+       }
        # record the first agent for each unknown product type. Will be used to determine system generated
        # managed systemlist later on.
-       $ptx = $xprodx{$product};
-       if (!defined $ptx) {
-          $xprodi++;
-          $ptx = $xprodi;
-          $xprod[$ptx] = $product;
-          $xprodx{$product} = $ptx;
-          $xprodn{$node} = $ptx;
-          $xprod_agent[$ptx] = $node;
-          my $ex = $extmslx{$product};
-          if (defined $ex) {
-             $xprod_msl[$ptx] = $ex;
-          } else {
-             $xprod_msl[$ptx] = ();
-             if ($samp_nodes eq "") {
-                $samp_nodes .= "NODE='$node'";
+       if ($want_pc == 1) {
+          $ptx = $xprodx{$product};
+          if (!defined $ptx) {
+             $ptx = $opt_pcx{$product};
+             $xprodi++;
+             $ptx = $xprodi;
+             $xprod[$ptx] = $product;
+             $xprodx{$product} = $ptx;
+             $xprodn{$node} = $ptx;
+             $xprod_agent[$ptx] = $node;
+             my $ex = $extmslx{$product};
+             if (defined $ex) {
+                $xprod_msl[$ptx] = $ex;
              } else {
-                $samp_nodes .= " OR NODE='$node'";
+                $xprod_msl[$ptx] = ();
+                if ($samp_nodes eq "") {
+                   $samp_nodes .= "NODE='$node'";
+                } else {
+                   $samp_nodes .= " OR NODE='$node'";
+                }
              }
+             $xprod_health_ct[$ptx] = 0;
           }
-          $xprod_health_ct[$ptx] = 0;
        }
 
        # keep track of the number of products of each type at each TEMS
@@ -1785,3 +1801,5 @@ $run_status++;
 #          : handle early errors better
 #          : add double retry at 15 and then 50 seconds and record
 #          : handle oplog1 report better
+# 0.95000  : switch to Health wording
+# 0.96000  : restore selective survey
