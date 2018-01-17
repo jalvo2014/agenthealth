@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.99000";
+my $gVersion = "1.00000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -715,7 +715,23 @@ my $o_file = $opt_workpath . $opt_o;
 open OH, ">$o_file" or die "can't open '$o_file': $!";
 print OH "Agent Health Report $gVersion - duration $health_dur seconds\n";
 print OH "Start: $health_start_time hub TEMS: $tems_hub_nodeid\n";
-print OH "Arguments $args_start\n";
+
+
+my @pargs_words = split(" ",$args_start);
+my $pargs_start = "";
+for (my $a=0; $a <=$#pargs_words; $a++) {
+   my $word1 = $pargs_words[$a];
+   $pargs_start .= $word1 . " ";
+   if ($word1 eq "-user") {
+      $pargs_start .= "UUUUUUUU ";
+      $a += 1;
+   } elsif ($word1 eq "-passwd") {
+      $pargs_start .= "PPPPPPPP ";
+      $a += 1;
+   }
+}
+
+print OH "Arguments $pargs_start\n";
 print OH "\n";
 my $psnodei = $snodei+1;
 print OH "Total Agents,$psnodei,\n";
@@ -1847,3 +1863,4 @@ $run_status++;
 # 0.97000  : handle null INODESTS RESERVED column
 # 0.98000  : handle a divide by zero case
 # 0.99000  : make exit code 1 when possible unhealthy agents are found
+# 1.00000  : Suppress display of -user and -password values
