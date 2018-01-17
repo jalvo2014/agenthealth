@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "1.02000";
+my $gVersion = "1.04000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -86,6 +86,7 @@ my $px;
 my $t;
 my $total_interested = 0;
 my %agentx = ();                               # hash index to agents of interest
+my %ignorex = ();                              # hash index to agents which should be ignored
 my $ax;
 
 # forward declarations of subroutines
@@ -116,7 +117,8 @@ my @opt_pc = ();                # Product codes - like ux for Unix OS Agent
 my %opt_pcx = ();               # index to Product codes
 my @opt_tems = ();              # TEMS names to survey
 my %opt_temsx = ();             # index to TEMS names
-my $opt_agent_list;             # agent names;
+my $opt_agent_list;             # agent names
+my $opt_ignore_list;            # agent names to ignore
 my @opt_agent = ();             # specific agent names
 my $opt_dpr;                    # dump data structure flag
 my $opt_std;                    # Credentials from standard input
@@ -197,6 +199,7 @@ my @xprod = ();
 my %xprodx = ();
 my %xprodn = ();
 my @xprod_agent = ();
+my @xprod_msl_got = ();
 my @xprod_msl = ();
 my @xprod_msls = ();
 my @xprod_health_ct = ();
@@ -425,6 +428,10 @@ for (my $t=0; $t<=$temsi; $t++) {
 
    for (my $p=0; $p<=$xprodi; $p++) {
       my $at_product = $xprod[$p];
+      if (!defined $xprod_msl[$p]) {
+         logit(10,"Missing product MSL for $at_product [$p]");
+         next;
+      }
       my @at_nodelists = @{$xprod_msl[$p]};
 
       for (my $m=0;$m<=$#at_nodelists; $m++) {
@@ -801,6 +808,7 @@ sub init {
               'tems=s' => \  @opt_tems,               # TEMS names
               'dpr' => \ $opt_dpr,                    # dump data structures
               'agent_list=s' => \ $opt_agent_list,    # file with agents of interest
+              'ignore_list=s' => \ $opt_ignore_list,  # file with agents to ignore
               'agent=s' => \  @opt_agent,             # agents of interest
               'std' => \ $opt_std                     # credentials from standard input
              );
@@ -866,6 +874,7 @@ sub init {
       elsif ($words[0] eq "tems") {push(@opt_tems,$words[1]);}
       elsif ($words[0] eq "agent") {push(@opt_agent,$words[1]);}
       elsif ($words[0] eq "agent_list") {$opt_agent_list = $words[1];}
+      elsif ($words[0] eq "ignore_list") {$opt_ignore_list = $words[1];}
       elsif ($words[0] eq "agent_timeout") {$opt_agent_timeout = $words[1];}
       elsif ($words[0] eq "retry_timeout") {$opt_retry_timeout = $words[1];}
       elsif ($words[0] eq "retry_timeout2") {$opt_retry_timeout2 = $words[1];}
@@ -894,6 +903,7 @@ sub init {
    if (!defined $opt_o) {$opt_o="health.csv";}                 # default output file
    if (!defined $opt_workpath) {$opt_workpath="";}             # default is current directory
    if (!defined $opt_agent_list) {$opt_agent_list="";}         # default to no agent file
+   if (!defined $opt_ignore_list) {$opt_ignore_list="";}       # default to no ignore agent list
 
    $opt_workpath =~ s/\\/\//g;                                 # convert to standard perl forward slashes
    if ($opt_workpath ne "") {
@@ -922,6 +932,16 @@ sub init {
          chomp($oneline);
          $oneline =~ s/\s+$//;   #trim trailing whitespace
          $agentx{$oneline} = 1;
+      }
+   }
+   if ($opt_ignore_list ne "") {
+      open( FILE, "< $opt_ignore_list" ) or die "Cannot open ignore_list $opt_ignore_list : $!";
+      my @ips = <FILE>;
+      close FILE;
+      foreach my $oneline (@ips) {
+         chomp($oneline);
+         $oneline =~ s/\s+$//;   #trim trailing whitespace
+         $ignorex{$oneline} = 1;
       }
    }
 
@@ -1172,6 +1192,10 @@ sub tems_node_analysis
           $ax = $agentx{$node};
           $snode_agent_interested[$snx] = 0 if !defined $ax;
        }
+       if (%ignorex) {
+          $ax = $ignorex{$node};
+          $snode_agent_interested[$snx] = 0 if defined $ax;
+       }
        $ptx = $temsx{$thrunode};
        $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] eq "";
        $total_interested += 1 if $snode_agent_interested[$snx] == 1;
@@ -1193,9 +1217,11 @@ sub tems_node_analysis
              $xprodx{$product} = $ptx;
              $xprodn{$node} = $ptx;
              $xprod_agent[$ptx] = $node;
+             $xprod_msl_got[$ptx] = 0;
              my $ex = $extmslx{$product};
              if (defined $ex) {
                 $xprod_msl[$ptx] = $ex;
+                $xprod_msl_got[$ptx] = 1;
              } else {
                 $xprod_msl[$ptx] = ();
                 if ($samp_nodes eq "") {
@@ -1222,9 +1248,16 @@ sub tems_node_analysis
        }
        $pxprod_count[$ptx] += 1;
        logit(100,"Node $snodei $node product[$snode_tems_product[$snx]] thrunode[[$snode_tems_thrunode[$snx]] hostaddr[[$snode_tems_hostaddr[$snx]]  agent_version[$snode_agent_version[$snx]]  agent_common[$snode_agent_common[$snx]]");
-   }
+    }
 
-   if ($samp_nodes ne "") {
+    if ($total_interested == 0) {
+       print STDERR "No Agents found of interest - exiting\n";
+       exit 0;
+    }
+
+
+
+    if ($samp_nodes ne "") {
       # Get TNODELST data to figure out what the system generated MSL name is for each product
       $sSQL = "SELECT NODE, NODELIST, NODETYPE FROM O4SRV.TNODELST WHERE $samp_nodes AND NODETYPE='M'";
       @list = DoSoap("CT_Get",$sSQL);
@@ -1248,9 +1281,45 @@ sub tems_node_analysis
              @xprod_msls = ();
              push(@xprod_msls,$nodelist);
              $xprod_msl[$ptx] = \@xprod_msls;
+             $xprod_msl_got[$ptx] = 1;
              my $in_prod = $xprod[$ptx];
              logit(10,"Added product[$in_prod] using nodelist[$nodelist]");
           }
+      }
+
+      # following logic is needed because sometimes a SOAP call does not return all the needed data.
+      # Usually the last item is missing. The logic tracks which agents are missing and gets the data
+      # individually.
+      for (my $x=0;$x<=$xprodi;$x++) {
+         next if $xprod_msl_got[$x] == 1;
+         $node = $xprod_agent[$x];
+         $sSQL = "SELECT NODE, NODELIST, NODETYPE FROM O4SRV.TNODELST WHERE NODE = '$node' AND NODETYPE='M'";
+         @list = DoSoap("CT_Get",$sSQL);
+         if ($run_status) { exit 1;}
+         $ll = 0;
+         $pcount = $#list+1;
+         foreach my $r (@list) {
+            $ll++;
+             my $count = scalar(keys %$r);
+             if ($count < 3) {
+                logit(10,"stage 2 working on TNODELST results row $ll of $pcount has $count instead of expected 3 keys");
+                next;
+             }
+             $node = $r->{NODE};
+             $node =~ s/\s+$//;   #trim trailing whitespace
+             $nodelist = $r->{NODELIST};
+             $nodelist =~ s/\s+$//;   #trim trailing whitespace
+             next if substr($nodelist,0,1) ne "*";
+             $ptx = $xprodn{$node};
+             if (defined $ptx) {
+                @xprod_msls = ();
+                push(@xprod_msls,$nodelist);
+                $xprod_msl[$ptx] = \@xprod_msls;
+                $xprod_msl_got[$ptx] = 1;
+                my $in_prod = $xprod[$ptx];
+                logit(10,"Added product[$in_prod] using nodelist[$nodelist]");
+             }
+         }
       }
    }
 }
@@ -1465,8 +1534,8 @@ sub GiveHelp
 
   $0 v$gVersion
 
-  This script surveys an ITM environment looking agents which are
-  online but possible not responsive.
+  This script surveys an ITM environment looking for possibly unhealthy agents
+  which are online not responsive.
 
   Default values:
     log           : health.log
@@ -1483,7 +1552,8 @@ sub GiveHelp
     dpr           : 0  dump data structure if Dump::Data installed
     std           : 0  get user/password from stardard input
     agent         : single agent survey - can have multiple
-    agent_list    : file with list of agent names
+    agent_list    : text file with list of agent names
+    ignore_list   : text file with list of agent names to ignore
     agent_timeout : seconds to wait for an agent response, default 50 seconds
     noretry       : after a stage I failure, skip the retry on individual agents, default off
     retry_timeout : Agent timeout during retry/1 - default 15 seconds
@@ -1492,7 +1562,7 @@ sub GiveHelp
   Example invovation
     $0  -ini <control file> -pc ux
 
-  Note: $0 uses an initialization file [default survey.ini] for many controls.
+  Note: $0 uses an initialization file [default health.ini] for many controls.
 
 EndOFHelp
 exit;
@@ -1903,3 +1973,5 @@ $run_status++;
 # 1.01000  : Handle traffic.txt when workpath specified
 #          : Add -agent and -agent_list and agent and agent_list
 # 1.02000  : handle non -agent/-agent_list cases
+# 1.03000  : handle product to MSL retrieval better
+# 1.04000  : add -ignore_list option
