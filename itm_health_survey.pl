@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "1.04000";
+my $gVersion = "1.06000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -88,6 +88,7 @@ my $total_interested = 0;
 my %agentx = ();                               # hash index to agents of interest
 my %ignorex = ();                              # hash index to agents which should be ignored
 my $ax;
+my $test_missing = 1;                          # when 1 force a unhealthy agents
 
 # forward declarations of subroutines
 
@@ -129,7 +130,23 @@ my $opt_retry_timeout;          # delay time during retry/1, default 15
 my $opt_retry_timeout2;         # delay time during retry/2, default 50
 my $opt_o;                      # output file
 my $opt_workpath;               # Directory to store output files
+my $opt_um;                     # write universal message for each potential unhealthy agent
+my @opt_um_parms;               # write universal message, parms
+my $opt_um_sev = 5;             # universal message severity, default 5
+my $opt_um_cat = "KO4ALM90";     # universal message id, default KO4ALM90
 
+my $msg_agent = "";
+my $msg_thrunode = "";
+my $msg_hostaddr = "";
+my $msg_hostinfo = "";
+my $msg_product = "";
+my $msg_version = "";
+
+my $opt_um_msg = 'Possible unhealthy agent [${msg_agent}] thrunode [${msg_thrunode}]'; #default message
+                                                                            # can also use ${msg_hostaddr}
+                                                                            # can also use ${msg_hostinfo}
+                                                                            # can also use ${msg_product}
+                                                                            # can also use ${msg_version}
 my $user="";
 my $passwd="";
 
@@ -184,6 +201,7 @@ my @snode_tems_product = ();                   # Product Code [Agent type] the a
 my @snode_tems_thrunode = ();                  # thrunode [remote TEMS for simple situations] the agent connects to
 my @snode_tems_version = ();                   # version of [remote TEMS for simple situations] the agent connects to
 my @snode_tems_hostaddr = ();                  # hostaddr information, include ip address
+my @snode_tems_hostinfo = ();                  # hostinfo information, include ip address
 my @snode_tems_health_ct = ();                 # count of unhealthy
 my @snode_agent_version = ();                  # version  information, include ip address
 my @snode_agent_arch = ();                     # system architecture of system running agent
@@ -475,6 +493,7 @@ for (my $t=0; $t<=$temsi; $t++) {
                   $sx = $snodex{$in_node};
                   next if !defined $sx;
                   next if $snode_agent_interested[$sx] == 0;
+                  if ($test_missing == 1) {next if $in_node eq "nmp180:LZ";}   #debug
                   $snode_agent_responsive[$sx] = 1 if $in_id ne "";
                } # next entries
             } # some entries
@@ -502,6 +521,7 @@ if ($opt_noretry == 0) {
                $in_datetime =~ s/\s+$//;   #trim trailing whitespace
                $in_node = $r->{System_Name};
                $in_node =~ s/\s+$//;   #trim trailing whitespace
+               if ($test_missing == 1) {next if $in_node eq "nmp180:LZ";}   #debug
                $snode_agent_responsive[$i] = 1;
                $snode_agent_retry[$i] = 1;
                $snode_agent_retry_timeout[$i] = $opt_retry_timeout;
@@ -531,6 +551,7 @@ if ($opt_noretry == 0) {
                $in_datetime =~ s/\s+$//;   #trim trailing whitespace
                $in_node = $r->{System_Name};
                $in_node =~ s/\s+$//;   #trim trailing whitespace
+               if ($test_missing == 1) {next if $in_node eq "nmp180:LZ";}   #debug
                $snode_agent_responsive[$i] = 1;
                $snode_agent_retry[$i] = 1;
                $snode_agent_retry_timeout[$i] = $opt_retry_timeout2;
@@ -623,6 +644,38 @@ for (my $i=0; $i<=$snodei; $i++) {
    } else {
       $total_responsive += 1;
       $total_retries += 1 if $snode_agent_retry[$i] == 1;
+   }
+}
+if ($opt_um == 1) {
+   if ($total_nonresponsive > 0) {
+      for (my $i=0; $i<=$snodei; $i++) {
+         next if $snode_agent_interested[$i] == 0;
+         next if $snode_agent_responsive[$i] == 1;
+         $msg_agent = $snode[$i];
+         $msg_thrunode = $snode_tems_thrunode[$i];
+         $msg_hostaddr = $snode_tems_hostaddr[$i];
+         $msg_hostinfo = $snode_tems_hostinfo[$i];
+         $msg_product = $snode_tems_product[$i];
+         $msg_version = $snode_tems_version[$i];
+         my $um_msg = eval "\"" . $opt_um_msg . "\"";
+         @list = DoSoap("CT_WTO",$um_msg,$opt_um_sev,$opt_um_cat);
+         if ($run_status) {
+            $DB::single=2 if $opt_debug == 1;
+            logit(0,"SOAP CT_WTO failure");
+            $run_status = 0;
+            next;
+         }
+         if ($soap_rc == 0) {         # if good return code and empty fault string, then declare success
+            if ($soap_faultstr eq "") {
+               logit(0,"SOAP CT_WTO success");
+            } else {
+                logit(0,"SOAP CT_WTO failure [$soap_faultstr]");
+            }
+
+         } else {
+            logit(0,"SOAP CT_WTO bad return code [$soap_rc]");
+         }
+      }
    }
 }
 
@@ -799,11 +852,13 @@ sub init {
               'h' => \ $opt_h,                        # help
               'v' => \  $opt_v,                       # verbose - print immediately as well as log
               'vt' => \  $opt_vt,                     # verbose traffic - print traffic.txt
-              'noretry' => \  $opt_noretry,             # retry failures one by one
+              'test_missing' => \  $test_missing,     # verbose traffic - print traffic.txt
+              'noretry' => \  $opt_noretry,           # retry failures one by one
               'retry_timeout=i' => \ $opt_retry_timeout, # retry failures one by one stage 1
               'retry_timeout2=i' => \ $opt_retry_timeout2, # retry failures one by one stage 2
               'o=s' => \ $opt_o,                      # output file
               'workpath=s' => \ $opt_workpath,        # output file
+              'um=s{0,}' => \@opt_um_parms,           # universal message input parms
               'pc=s' => \  @opt_pc,                   # Product Code
               'tems=s' => \  @opt_tems,               # TEMS names
               'dpr' => \ $opt_dpr,                    # dump data structures
@@ -828,6 +883,17 @@ sub init {
    if ($opt_h) {&GiveHelp;}  # GiveHelp and exit program
    if (!defined $opt_debuglevel) {$opt_debuglevel=90;}         # debug logging level - low number means fewer messages
    if (!defined $opt_debug) {$opt_debug=0;}                    # debug - turn on rare error cases
+   if ($#opt_um_parms != -1) {
+      $opt_um = 1;
+      if ($opt_um_parms[0] ne "") {
+         $opt_um_sev = $opt_um_parms[0];
+         if ($#opt_um_parms != 0) {
+            $opt_um_cat = $opt_um_parms[1];
+            die "-um has too many options  $#opt_um_parms - maximum 2\n" if $#opt_um_parms != 1;
+         }
+      }
+   }
+
 
    # ini control file must be present
 
@@ -857,6 +923,7 @@ sub init {
          elsif ($words[0] eq "std") {$opt_std = 1;}
          elsif ($words[0] eq "noretry") {$opt_noretry = 1;}
          elsif ($words[0] eq "passwd") {}                      # null password
+         elsif ($words[0] eq "um") {$opt_um = 1;}              # um with default options
          else {
             print STDERR "SURVEY003E Control without needed parameters $words[0] - $opt_ini [$l]\n";
             $run_status++;
@@ -864,27 +931,51 @@ sub init {
          next;
       }
 
-      # two word controls - option and value
-      if ($words[0] eq "soapurl") {push(@connections,$words[1]);}
-      elsif ($words[0] eq "soap") {push(@connections,$words[1]);}
-      elsif ($words[0] eq "user")  {$user = $words[1];}
-      elsif ($words[0] eq "passwd")  {$passwd = $words[1];}
-      elsif ($words[0] eq "log") {$opt_log = $words[1];}
-      elsif ($words[0] eq "pc") {push(@opt_pc,$words[1]);}
-      elsif ($words[0] eq "tems") {push(@opt_tems,$words[1]);}
-      elsif ($words[0] eq "agent") {push(@opt_agent,$words[1]);}
-      elsif ($words[0] eq "agent_list") {$opt_agent_list = $words[1];}
-      elsif ($words[0] eq "ignore_list") {$opt_ignore_list = $words[1];}
-      elsif ($words[0] eq "agent_timeout") {$opt_agent_timeout = $words[1];}
-      elsif ($words[0] eq "retry_timeout") {$opt_retry_timeout = $words[1];}
-      elsif ($words[0] eq "retry_timeout2") {$opt_retry_timeout2 = $words[1];}
-      elsif ($words[0] eq "o") {$opt_o = $words[1];}
-      elsif ($words[0] eq "workpath") {$opt_workpath = $words[1];}
-      elsif ($words[0] eq "soap_timeout") {$opt_soap_timeout = $words[1];}
-      else {
-         print STDERR "SURVEY005E ini file $l - unknown control $words[0]\n"; # kill process after current phase
-         $run_status++;
+      if ($#words == 1) {
+         # two word controls - option and value
+         if ($words[0] eq "soapurl") {push(@connections,$words[1]);}
+         elsif ($words[0] eq "soap") {push(@connections,$words[1]);}
+         elsif ($words[0] eq "user")  {$user = $words[1];}
+         elsif ($words[0] eq "passwd")  {$passwd = $words[1];}
+         elsif ($words[0] eq "log") {$opt_log = $words[1];}
+         elsif ($words[0] eq "pc") {push(@opt_pc,$words[1]);}
+         elsif ($words[0] eq "tems") {push(@opt_tems,$words[1]);}
+         elsif ($words[0] eq "agent") {push(@opt_agent,$words[1]);}
+         elsif ($words[0] eq "agent_list") {$opt_agent_list = $words[1];}
+         elsif ($words[0] eq "ignore_list") {$opt_ignore_list = $words[1];}
+         elsif ($words[0] eq "agent_timeout") {$opt_agent_timeout = $words[1];}
+         elsif ($words[0] eq "retry_timeout") {$opt_retry_timeout = $words[1];}
+         elsif ($words[0] eq "retry_timeout2") {$opt_retry_timeout2 = $words[1];}
+         elsif ($words[0] eq "o") {$opt_o = $words[1];}
+         elsif ($words[0] eq "workpath") {$opt_workpath = $words[1];}
+         elsif ($words[0] eq "soap_timeout") {$opt_soap_timeout = $words[1];}
+         elsif ($words[0] eq "um") {$opt_um=1; $opt_um_sev=$words[1];}
+         else {
+            print STDERR "SURVEY005E ini file $l - unknown control oneline\n"; # kill process after current phase
+            $run_status++;
+         }
+         next;
       }
+      if ($#words >= 2) {
+         # three+ word controls - option and two values and optional message template
+         if ($words[0] eq "um") {
+            $opt_um=1;
+            $opt_um_sev=$words[1];
+            $opt_um_cat=$words[2];
+            if ($#words > 2) {
+               splice(@words,0,3);
+               $opt_um_msg = join(" ",@words);
+            }
+         }
+
+         else {
+            print STDERR "SURVEY005E ini file $l - unknown control $oneline\n"; # kill process after current phase
+            $run_status++;
+         }
+         next;
+      }
+      print STDERR "SURVEY005E ini file $l - unknown control $oneline\n"; # kill process after current phase
+      $run_status++;
    }
 
    # defaults for options not set otherwise
@@ -896,7 +987,7 @@ sub init {
    if (!defined $opt_dpr) {$opt_dpr=0;}                        # data dump flag
    if (!defined $opt_std) {$opt_std=0;}                        # default - no credentials in stdin
    if (!defined $opt_agent_timeout) {$opt_agent_timeout=50;}   # default 50 seconds
-   if (!defined $opt_soap_timeout) {$opt_soap_timeout=180;}    # default 180 seconds
+   if (!defined $opt_soap_timeout) {$opt_soap_timeout=60;}    # default 180 seconds
    if (!defined $opt_noretry) {$opt_noretry=0;}                # default to retry
    if (!defined $opt_retry_timeout) {$opt_retry_timeout=15;}   # default 15 second retry stage 1
    if (!defined $opt_retry_timeout2) {$opt_retry_timeout2=50;}  # default 50 second retry stage 2
@@ -1015,6 +1106,7 @@ sub tems_node_analysis
    @snode_tems_thrunode = ();
    @snode_tems_version = ();
    @snode_tems_hostaddr = ();
+   @snode_tems_hostinfo = ();
    @snode_tems_health_ct = ();
    @snode_agent_version = ();                  # version  information, include ip address
    @snode_agent_arch = ();                     # architecture
@@ -1049,7 +1141,7 @@ sub tems_node_analysis
 
    my $name;
    # get full INODESTS of online agents
-   $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y'";
+   $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, HOSTINFO, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
 
@@ -1148,6 +1240,8 @@ sub tems_node_analysis
        $thrunode =~ s/\s+$//;   #trim trailing whitespace
        my $hostaddr = $r->{HOSTADDR};
        $hostaddr =~ s/\s+$//;   #trim trailing whitespace
+       my $hostinfo = $r->{HOSTINFO};
+       $hostinfo =~ s/\s+$//;   #trim trailing whitespace
        my $agent_version = $r->{VERSION};
        $agent_version =~ s/\s+$//;   #trim trailing whitespace
        my $agent_common = $r->{RESERVED};
@@ -1161,6 +1255,7 @@ sub tems_node_analysis
        $snode_tems_product[$snx] = $product;
 
        $snode_tems_hostaddr[$snx] = $hostaddr;
+       $snode_tems_hostinfo[$snx] = $hostinfo;
        $snode_tems_thrunode[$snx] = $thrunode;
        $snode_agent_version[$snx] = $agent_version;
        if ($agent_common eq "") {
@@ -1384,6 +1479,7 @@ sub DoSoap
       my $myAlert_timestamp = shift;
 
       my @aParms = (
+         SOAP::Data->name(table => 'O4SRV.CLACTLCLO4SRV.UTCTIME' ),
          SOAP::Data->name(userid => $user ),
          SOAP::Data->name(password => $passwd ),
          SOAP::Data->name(name =>      $myAlert_name),
@@ -1419,6 +1515,27 @@ sub DoSoap
       $soap_rc = $?;
       #$survey_sql_time += time - $sql_start_time;
       logit(10,"SOAP Reset end [$soap_rc]");
+
+   } elsif ($soap_action eq "CT_WTO") {
+      my $myAlert_data = shift;
+      my $myAlert_severity = shift;
+      my $myAlert_category = shift;
+
+      my @aParms = (
+         SOAP::Data->name(userid => $user ),
+         SOAP::Data->name(password => $passwd ),
+         SOAP::Data->name(table => "O4SRV.CLACTLCL" ),
+         SOAP::Data->name(object => "Local_System_Command" ),
+         SOAP::Data->name(data =>      $myAlert_data),
+         SOAP::Data->name(category =>    $myAlert_category),
+         SOAP::Data->name(severity =>      $myAlert_severity)
+      );
+
+      logit(10,"SOAP WTO start - $myAlert_data $myAlert_category $myAlert_severity");
+      $res = $oHub->CT_WTO(@aParms);
+      $soap_rc = $?;
+      #$survey_sql_time += time - $sql_start_time;
+      logit(10,"SOAP CT_WTO end [$soap_rc]");
 
    } else {
       logit(0,"Unknown SOAP message [$soap_action]");
@@ -1549,6 +1666,7 @@ sub GiveHelp
     vt            : 0  record http traffic on traffic.txt file
     pc            : product code of agents - can supply multiple codes
     tems          : tems the agents report to - can supply multiple code
+    um            : <none> write universal message. need severity and id
     dpr           : 0  dump data structure if Dump::Data installed
     std           : 0  get user/password from stardard input
     agent         : single agent survey - can have multiple
@@ -1975,3 +2093,5 @@ $run_status++;
 # 1.02000  : handle non -agent/-agent_list cases
 # 1.03000  : handle product to MSL retrieval better
 # 1.04000  : add -ignore_list option
+# 1.05000  : add -um to send univeral message on unhealthy agents
+# 1.06000  : let um message be settable by the user from ini file
