@@ -5,7 +5,7 @@
 # or disclosure restricted by GSA ADP Schedule Contract with IBM Corp
 #------------------------------------------------------------------------------
 
-#  perl itm_zombie_survey.pl
+#  perl itm_health_survey.pl
 #
 #  Identify agents that may be online but not responsive
 #  Read the first record of the operations log in groups.
@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.90000";
+my $gVersion = "0.95000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -60,6 +60,7 @@ my $oHub;                              # SOAP::Lite object to define connection
 # some common variables
 
 my @list = ();                         # used to get result of good SOAP capture
+my @list_tems = ();                         # used to get result of good SOAP capture
 my $rc;
 my $node;
 my $hub_node;
@@ -95,8 +96,8 @@ sub datadumperlog;                       # dump a variable using Dump::Data if i
 sub get_connection;                      # get current connection string
 sub gettime;                             # get time
 
-my $zombie_start = time;                 # decimal epoch time number
-my $zombie_start_time = gettime();       # formated current time for report
+my $health_start = time;                 # decimal epoch time number
+my $health_start_time = gettime();       # formated current time for report
 
 # option and ini file variables variables
 
@@ -138,7 +139,7 @@ if ($opt_vt == 1) {
 
 open FH, ">>$opt_log" or die "can't open '$opt_log': $!";
 
-logit(0,"SURVEY000I - ITM_Zombie_Survey $gVersion $args_start");
+logit(0,"SURVEY000I - ITM_Health_Survey $gVersion $args_start");
 
 # Variables
 
@@ -172,7 +173,7 @@ my @snode_tems_product = ();                   # Product Code [Agent type] the a
 my @snode_tems_thrunode = ();                  # thrunode [remote TEMS for simple situations] the agent connects to
 my @snode_tems_version = ();                   # version of [remote TEMS for simple situations] the agent connects to
 my @snode_tems_hostaddr = ();                  # hostaddr information, include ip address
-my @snode_tems_zombie_ct = ();                 # count of zombies
+my @snode_tems_health_ct = ();                 # count of unhealthy
 my @snode_agent_version = ();                  # version  information, include ip address
 my @snode_agent_arch = ();                     # system architecture of system running agent
 my @snode_agent_common  = ();                  # common software levels
@@ -189,13 +190,13 @@ my %xprodn = ();
 my @xprod_agent = ();
 my @xprod_msl = ();
 my @xprod_msls = ();
-my @xprod_zombie_ct = ();
+my @xprod_health_ct = ();
 
 my $pxprodi = -1;
 my @pxprod = ();
 my %pxprodx = ();
 my @pxprod_count = ();
-my @pxprod_zombie_ct = ();
+my @pxprod_health_ct = ();
 
 my $tx;                                        # index
 my $temsi = -1;                                # count of TEMSes in survey
@@ -204,12 +205,8 @@ my %temsx = ();                                # index to TEMS
 my @tems_time = ();                            # Current UTC time at the TEMS
 my @tems_thrunode = ();                        # thrunode - can be used to identify hub
 my @tems_version = ();                         # version
-my @tems_vmsize = ();                          # current process size
-my @tems_cpubusy = ();                         # current process cpubusy
-my @tems_server_busy = ();                     # current server cpubusy
 my @tems_hostaddr = ();                        # current server host address
-my @tems_zombie_ct = ();                       # number of zombie agents
-my $temsat = "";                               # AT clause for SQL to all TEMSes
+my @tems_health_ct = ();                       # number of unhealthy agents
 my $tems_hub_nodeid = "";                      # nodeid of hub;
 
 # pre-stored product code to system generated Managed System List names
@@ -515,12 +512,12 @@ if ($opt_noretry == 0) {
 my $vertemsi = -1;
 my @vertems  = ();
 my %vertemsx = ();
-my @vertems_zombie_ct = ();
+my @vertems_health_ct = ();
 
 my $vertemai = -1;
 my @vertema  = ();
 my %vertemax = ();
-my @vertema_zombie_ct = ();
+my @vertema_health_ct = ();
 
 my $total_uninterested = 0;
 my $total_nonresponsive = 0;
@@ -533,7 +530,7 @@ my $outline;
 my $p_ver;
 
 # now produce report
-$rlinei++;$rline[$rlinei]="Possible Zombie Agents\n";
+$rlinei++;$rline[$rlinei]="Possible Unhealthy Agents\n";
 $rlinei++;$rline[$rlinei]="Node,Thrunode,TEMS_version,Product,Agent_Version,Agent_Arch,TEMA_version,Hostaddr\n";
 for (my $i=0; $i<=$snodei; $i++) {
    if ($snode_agent_interested[$i] == 0) {
@@ -565,9 +562,9 @@ for (my $i=0; $i<=$snodei; $i++) {
          $px = $vertemsi;
          $vertems[$px] = $snode_tems_version[$i];
          $vertemsx{$key} = $px;
-         $vertems_zombie_ct[$px] = 0;
+         $vertems_health_ct[$px] = 0;
       }
-      $vertems_zombie_ct[$px] += 1;
+      $vertems_health_ct[$px] += 1;
 
       # count by TEMA version
       $key = $p_ver;
@@ -577,19 +574,19 @@ for (my $i=0; $i<=$snodei; $i++) {
          $px = $vertemai;
          $vertema[$px] = $p_ver;
          $vertemax{$key} = $px;
-         $vertema_zombie_ct[$px] = 0;
+         $vertema_health_ct[$px] = 0;
       }
-      $vertema_zombie_ct[$px] += 1;
+      $vertema_health_ct[$px] += 1;
 
       # count by TEMS nodeid
       $key = $snode_tems_thrunode[$i];
       $px = $temsx{$key};
-      $tems_zombie_ct[$px] += 1 if defined $px;
+      $tems_health_ct[$px] += 1 if defined $px;
 
       # count by Product
       $key = $snode_tems_product[$i];
       $px = $xprodx{$key};
-      $xprod_zombie_ct[$px] += 1 if defined $px;
+      $xprod_health_ct[$px] += 1 if defined $px;
    } else {
       $total_responsive += 1;
       $total_retries += 1 if $snode_agent_retry[$i] == 1;
@@ -598,44 +595,44 @@ for (my $i=0; $i<=$snodei; $i++) {
 
 if ($total_nonresponsive > 0) {
 
-   # report on zombie agents
+   # report on unheathy agents
    $rlinei++;$rline[$rlinei]="\n";
-   $rlinei++;$rline[$rlinei]="TEMS,Zombie Count\n";
-   foreach my $f ( sort { $tems_zombie_ct[$temsx{$b}] cmp $tems_zombie_ct[$temsx{$a}] } keys %temsx ) {
+   $rlinei++;$rline[$rlinei]="TEMS,UnHealthy Count\n";
+   foreach my $f ( sort { $tems_health_ct[$temsx{$b}] cmp $tems_health_ct[$temsx{$a}] } keys %temsx ) {
       $px = $temsx{$f};
       $outline = "$tems[$px],";
-      $outline .= "$tems_zombie_ct[$px],";
+      $outline .= "$tems_health_ct[$px],";
       $rlinei++;$rline[$rlinei]="$outline\n";
    }
 
    # summarize by product
    $rlinei++;$rline[$rlinei]="\n";
-   $rlinei++;$rline[$rlinei]="Product,Zombie Count\n";
-   foreach my $f ( sort { $xprod_zombie_ct[$xprodx{$b}] cmp $xprod_zombie_ct[$xprodx{$a}] } keys %xprodx ) {
+   $rlinei++;$rline[$rlinei]="Product,UnHealthy Count\n";
+   foreach my $f ( sort { $xprod_health_ct[$xprodx{$b}] cmp $xprod_health_ct[$xprodx{$a}] } keys %xprodx ) {
       $px = $xprodx{$f};
       next if !defined $px;
       $outline = "$xprod[$px],";
-      $outline .= "$xprod_zombie_ct[$px],";
+      $outline .= "$xprod_health_ct[$px],";
       $rlinei++;$rline[$rlinei]="$outline\n";
    }
 
    # summarize by TEMS version
    $rlinei++;$rline[$rlinei]="\n";
-   $rlinei++;$rline[$rlinei]="TEMS Version,Zombie Count\n";
-   foreach my $f ( sort { $vertems_zombie_ct[$vertemsx{$b}] cmp $vertems_zombie_ct[$vertemsx{$a}] } keys %vertemsx) {
+   $rlinei++;$rline[$rlinei]="TEMS Version,Unhealthy Count\n";
+   foreach my $f ( sort { $vertems_health_ct[$vertemsx{$b}] cmp $vertems_health_ct[$vertemsx{$a}] } keys %vertemsx) {
       $px = $vertemsx{$f};
       $outline = "$vertems[$px],";
-      $outline .= "$vertems_zombie_ct[$px],";
+      $outline .= "$vertems_health_ct[$px],";
       $rlinei++;$rline[$rlinei]="$outline\n";
    }
 
    # summarize by TEMA version
    $rlinei++;$rline[$rlinei]="\n";
-   $rlinei++;$rline[$rlinei]="TEMA Version,Zombie Count\n";
-   foreach my $f ( sort { $vertema_zombie_ct[$vertemax{$b}] cmp $vertema_zombie_ct[$vertemax{$a}] } keys %vertemax) {
+   $rlinei++;$rline[$rlinei]="TEMA Version,Unhealthy Count\n";
+   foreach my $f ( sort { $vertema_health_ct[$vertemax{$b}] cmp $vertema_health_ct[$vertemax{$a}] } keys %vertemax) {
       $px = $vertemax{$f};
       $outline = "$vertema[$px],";
-      $outline .= "$vertema_zombie_ct[$px],";
+      $outline .= "$vertema_health_ct[$px],";
       $rlinei++;$rline[$rlinei]="$outline\n";
    }
 }
@@ -690,18 +687,18 @@ if ($total_oplog1 > 0) {
 }
 
 
-my $zombie_dur = time - $zombie_start;
+my $health_dur = time - $health_start;
 
 open OH, ">$opt_o" or die "can't open '$opt_o': $!";
-print OH "Zombie Agent Report $gVersion - duration $zombie_dur seconds\n";
-print OH "Start: $zombie_start_time hub TEMS: $tems_hub_nodeid\n";
+print OH "Agent Health Report $gVersion - duration $health_dur seconds\n";
+print OH "Start: $health_start_time hub TEMS: $tems_hub_nodeid\n";
 print OH "Arguments $args_start\n";
 print OH "\n";
 my $psnodei = $snodei+1;
 print OH "Total Managed systems,$psnodei,\n";
 print OH "Total Responsive agents,$total_responsive,\n";
 print OH "Total Responsive agents needing retry,$total_retries,\n";
-print OH "Total Zombie agents,$total_nonresponsive,\n";
+print OH "Total Unhealhy Agents,$total_nonresponsive,\n";
 print OH "Total Invalid Oplog agents,$total_oplog1,\n";
 print OH "\n";
 
@@ -754,7 +751,7 @@ sub init {
 
    # Folloowing are command line only defaults. All others can be set from the ini file
 
-   if (!defined $opt_ini) {$opt_ini = "zombie.ini";}           # default control file if not specified
+   if (!defined $opt_ini) {$opt_ini = "health.ini";}           # default control file if not specified
    if ($opt_h) {&GiveHelp;}  # GiveHelp and exit program
    if (!defined $opt_debuglevel) {$opt_debuglevel=90;}         # debug logging level - low number means fewer messages
    if (!defined $opt_debug) {$opt_debug=0;}                    # debug - turn on rare error cases
@@ -815,7 +812,7 @@ sub init {
 
    # defaults for options not set otherwise
 
-   if (!defined $opt_log) {$opt_log = "zombie.log";}           # default log file if not specified
+   if (!defined $opt_log) {$opt_log = "health.log";}           # default log file if not specified
    if (!defined $opt_h) {$opt_h=0;}                            # help flag
    if (!defined $opt_v) {$opt_v=0;}                            # verbose flag
    if (!defined $opt_vt) {$opt_vt=0;}                          # verbose traffic default off
@@ -826,7 +823,7 @@ sub init {
    if (!defined $opt_noretry) {$opt_noretry=0;}                # default to retry
    if (!defined $opt_retry_timeout) {$opt_retry_timeout=15;}   # default 15 second retry stage 1
    if (!defined $opt_retry_timeout2) {$opt_retry_timeout2=50;}  # default 50 second retry stage 2
-   if (!defined $opt_o) {$opt_o="zombie.csv";}                 # default output file
+   if (!defined $opt_o) {$opt_o="health.csv";}                 # default output file
 
 
    # collect the TEMSes information into an array
@@ -911,7 +908,7 @@ sub tems_node_analysis
    @snode_tems_thrunode = ();
    @snode_tems_version = ();
    @snode_tems_hostaddr = ();
-   @snode_tems_zombie_ct = ();
+   @snode_tems_health_ct = ();
    @snode_agent_version = ();                  # version  information, include ip address
    @snode_agent_arch = ();                     # architecture
    @snode_agent_common  = ();                  # common software levels
@@ -926,13 +923,9 @@ sub tems_node_analysis
    %temsx = ();
    @tems_thrunode = ();
    @tems_version = ();                         # version
-   @tems_vmsize = ();                          # current process size
-   @tems_cpubusy = ();                         # current process cpubusy
-   @tems_server_busy = ();                     # current server cpubusy
    @tems_hostaddr = ();                        # current TEMS host address
-   @tems_zombie_ct = ();                        # current TEMS host address
+   @tems_health_ct = ();                        # current TEMS host address
    @tems_time = ();
-   $temsat = "";
 
    # variables for tracking situation groups.
 
@@ -948,24 +941,37 @@ sub tems_node_analysis
    # variables for calculating the UADVISOR situations and situations with commands
 
    my $name;
-
-   # get names of online TEMSes
-   $sSQL = "SELECT NODE,THRUNODE,HOSTADDR,VERSION,HOSTINFO FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT='EM' AND THRUNODE = '$tems_hub_nodeid'";
+   # get full INODESTS of online agents
+   $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y'";
    @list = DoSoap("CT_Get",$sSQL);
    if ($run_status) { exit 1;}
 
+#   # get names of online TEMSes
+#   $sSQL = "SELECT NODE, THRUNODE, HOSTADDR, VERSION,HOSTINFO FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT='EM' AND THRUNODE = '$tems_hub_nodeid'";
+#   @list = DoSoap("CT_Get",$sSQL);
+#   if ($run_status) { exit 1;}
+
    foreach my $r (@list) {
+       my $count = scalar(keys %$r);
+       if ($count < 6) {
+          logit(10,"working on INODESTS row $ll of $pcount has $count instead of expected 6 keys");
+          next;
+       }
+       $product = $r->{PRODUCT};
+       $product =~ s/\s+$//;   #trim trailing whitespace
+       next if $product ne "EM";
+       my $thrunode = $r->{THRUNODE};
+       $thrunode =~ s/\s+$//;   #trim trailing whitespace
+       next if $thrunode ne $tems_hub_nodeid;
        $node = $r->{NODE};
        $node =~ s/\s+$//;   #trim trailing whitespace
-#$DB::single=2;
        $temsi++;
        $tx = $temsi;
        $tems[$tx] = $node;
        $temsx{$node} = $tx;
-       my $thrunode = $r->{'THRUNODE'};
-       $thrunode =~ s/\s+$//;   #trim trailing whitespace
        $tems_thrunode[$tx] = $thrunode;
        $tems_version[$tx] = $r->{'VERSION'};
+       $tems_time[$tx] = "";
        my $hostaddr;
        $rt = ref($r->{HOSTADDR});
        if ($rt eq "HASH") {
@@ -977,18 +983,14 @@ sub tems_node_analysis
        $hostaddr =~ s/\s+$//;   #trim trailing whitespace
        $tems_hub_nodeid = $node if $node eq $thrunode;
        $tems_hostaddr[$tx] = $hostaddr;
-       $tems_zombie_ct[$tx] = 0;
-       $tems_time[$tx] = 0;
-       $tems_vmsize[$tx] = 0;
-       $tems_cpubusy[$tx] = 0;
-       $tems_server_busy[$tx] = 0;
+       $tems_health_ct[$tx] = 0;
    }
 
 
    # determine if any TEMSes are non-responsive
    for (my $i=0;$i<=$temsi;$i++) {
       $sSQL = "SELECT SYSTIME FROM O4SRV.UTCTIME AT(\'$tems[$i]\')";
-      @list = DoSoap("CT_Get",$sSQL);
+      @list_tems = DoSoap("CT_Get",$sSQL);
       if ($run_status) {
          $s_errcode = 101;
          $s_erritem = "Timeout(TEMS)";
@@ -996,46 +998,40 @@ sub tems_node_analysis
          logit(0,$s_errtext);
          next;
       }
-      if ($#list == -1) {
+      if ($#list_tems == -1) {
          $s_errcode = 102;
          $s_erritem = "NoData(TEMS)";
          $s_errtext = "TEMS $tems[$i] TEMS Get time - no data";
          logit(0,$s_errtext);
          next;
       }
-      $tems_time[$i] = $list[0]->{Timestamp};
+      $tems_time[$i] = $list_tems[0]->{Timestamp};
    }
-
-   # calculate list of operational TEMSes that responded with a time.
-   for (my $i = 0; $i <=$temsi; $i++) {
-      next if $tems_time[$i] == 0;
-      if ($temsat eq "") { $temsat = "AT('";} else {$temsat .= ",'";}
-     $temsat .= $tems[$i] . "'";
-   }
-   $temsat .= ")";
 
    # get node status for online managed systems
    my $samp_nodes = "";    #prepare for nodelist capture
 
-   $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM'";
-   @list = DoSoap("CT_Get",$sSQL);
-   if ($run_status) { exit 1;}
+#   $sSQL = "SELECT NODE, THRUNODE, PRODUCT, HOSTADDR, VERSION, RESERVED FROM O4SRV.INODESTS WHERE O4ONLINE='Y' AND PRODUCT <> 'EM'";
+#   @list = DoSoap("CT_Get",$sSQL);
+#   if ($run_status) { exit 1;}
 
    $ll = 0;
    $pcount = $#list+1;
    foreach my $r (@list) {
+#$DB::single=2;
        $ll++;
        my $count = scalar(keys %$r);
        if ($count < 6) {
           logit(10,"working on INODESTS row $ll of $pcount has $count instead of expected 6 keys");
           next;
        }
+       $product = $r->{PRODUCT};
+       $product =~ s/\s+$//;   #trim trailing whitespace
+       next if $product eq "EM";
        $node = $r->{NODE};
        $node =~ s/\s+$//;   #trim trailing whitespace
        my $thrunode = $r->{THRUNODE};
        $thrunode =~ s/\s+$//;   #trim trailing whitespace
-       $product = $r->{PRODUCT};
-       $product =~ s/\s+$//;   #trim trailing whitespace
        my $hostaddr = $r->{HOSTADDR};
        $hostaddr =~ s/\s+$//;   #trim trailing whitespace
        my $agent_version = $r->{VERSION};
@@ -1078,7 +1074,7 @@ sub tems_node_analysis
        }
 
        $ptx = $temsx{$thrunode};
-       $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] == 0;
+       $snode_agent_interested[$snx] = 0 if $tems_time[$ptx] eq "";
 
        # record the first agent for each unknown product type. Will be used to determine system generated
        # managed systemlist later on.
@@ -1101,7 +1097,7 @@ sub tems_node_analysis
                 $samp_nodes .= " OR NODE='$node'";
              }
           }
-          $xprod_zombie_ct[$ptx] = 0;
+          $xprod_health_ct[$ptx] = 0;
        }
 
        # keep track of the number of products of each type at each TEMS
@@ -1114,7 +1110,7 @@ sub tems_node_analysis
           $pxprod[$ptx] = $key;
           $pxprodx{$key} = $ptx;
           $pxprod_count[$ptx] = 0;
-          $pxprod_zombie_ct[$ptx] = 0;
+          $pxprod_health_ct[$ptx] = 0;
        }
        $pxprod_count[$ptx] += 1;
        logit(100,"Node $snodei $node product[$snode_tems_product[$snx]] thrunode[[$snode_tems_thrunode[$snx]] hostaddr[[$snode_tems_hostaddr[$snx]]  agent_version[$snode_agent_version[$snx]]  agent_common[$snode_agent_common[$snx]]");
@@ -1365,8 +1361,8 @@ sub GiveHelp
   online but possible not responsive.
 
   Default values:
-    log          : zombie.log
-    ini          : zombie.ini
+    log          : health.log
+    ini          : health.ini
     user         : <none>
     passwd       : <none>
     debuglevel   : 90 [considerable number of messages]
