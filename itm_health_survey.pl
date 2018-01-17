@@ -23,7 +23,7 @@ use warnings;
 
 # short history at end of module
 
-my $gVersion = "0.97000";
+my $gVersion = "0.99000";
 my $gWin = (-e "C://") ? 1 : 0;    # 1=Windows, 0=Linux/Unix
 
 # communicate without certificates
@@ -738,6 +738,9 @@ for (my $i=0; $i<=$rlinei; $i++) {
 close OH;
 
 close FH;
+
+if ($total_nonresponsive > 0) {exit 1;}
+else { exit 0;}
 
 exit 0;
 
@@ -1842,4 +1845,5 @@ $run_status++;
 # 0.95000  : switch to Health wording
 # 0.96000  : restore selective survey
 # 0.97000  : handle null INODESTS RESERVED column
-#          : handle a divide by zero case
+# 0.98000  : handle a divide by zero case
+# 0.99000  : make exit code 1 when possible unhealthy agents are found
